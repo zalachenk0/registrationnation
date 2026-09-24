@@ -127,10 +127,7 @@ async function printRegistration(payload: RegistrationPrintPayload): Promise<voi
   }
 }
 
-// The actual amount charged on the card reader, in cents. Keep this in
-// sync with the fee breakdown shown in Step5 and the amount sent to
-// the print service below.
-const RENEWAL_FEE_CENTS = 7100; // $71.00
+const RENEWAL_FEE_CENTS = 7100; // amount charged to card reader in cents, $71.00
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -1133,12 +1130,9 @@ export default function App() {
     5: "Tap, insert, or swipe your card to complete the $71.00 renewal payment.",
   };
 
-  const handlePaymentAndPrint = async () => {
+  const handlePaymentAndPrint = async () => { // if payment was already received, reuses charge without charging again to print receipt
     setPrintError("");
-
-    // If a previous attempt already charged the card and only printing
-    // failed, reuse that charge instead of charging again - otherwise
-    // a print retry would double-charge the customer.
+    
     let paymentIntentId = pendingPaymentIntentId;
 
     if (!paymentIntentId) {
@@ -1168,10 +1162,12 @@ export default function App() {
       });
       setConfirmationNumber(confirmation);
       setSubmitted(true);
-      setPendingPaymentIntentId(null); // this renewal is fully done
+      setPendingPaymentIntentId(null);
     } catch (error) {
-      // The card was already charged - pendingPaymentIntentId stays
-      // set so the next click retries only the print, not the charge.
+      
+      // if the renewal is fully done and the card was charged
+      // pendingPaymentIntentId stays set so the next click retries only the print and not the charge
+      
       setPrintError(error instanceof Error ? error.message : "Printing failed. Please try again.");
     } finally {
       setPaymentStage("idle");
