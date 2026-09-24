@@ -1,12 +1,12 @@
 # Registration Nation: technical workflow
 
-These diagrams describe the current implementation. Read each sequence from top to bottom. Solid arrows are requests or function calls; dashed arrows are returns. Flask, the camera adapter and the document processors are local backend components, not separately deployed network services.
+These diagrams describe the current implementation. Read each sequence from top to bottom. Solid arrows are requests or function calls; dashed arrows (or the combined "→" notation on one arrow) are returns. Flask, the camera adapter, the document processors, and the payment/Monday.com services are local backend components, not separately deployed network services — Stripe and Monday.com's own servers are the only genuinely external systems involved.
 
 ## Runtime architecture
 
 The React/TypeScript application runs in the kiosk browser. In the integrated deployment, Flask serves the built `dist/` assets and the API on port 5000 by default. During development, Vite proxies `/api` requests to Flask. The Raspberry Pi controls camera capture on the server side, so the normal Capture & Scan path does not use the browser camera API.
 
-Staff sign-in is a frontend credential comparison that sets React state. It does not establish a backend-authenticated session. Customer details, payment fields and the current step also live in React state. This implementation has no registration database write or DMV integration.
+Staff sign-in is a frontend credential comparison that sets React state. It does not establish a backend-authenticated session. Customer details and the current step live in React state. Payment is different: the Payment step runs an actual Stripe Terminal charge (test mode) through `/api/payment/*` routes backed by the Stripe Python SDK, and a completed renewal is optionally logged to Monday.com through `/api/monday/create_record`. This implementation still has no registration database write or DMV integration.
 
 ## Slide 1: document capture and extraction
 
@@ -55,7 +55,31 @@ License scans update personal and license state. Insurance scans update vehicle 
 | Processing returns insufficient extraction | HTTP 200 with `success: false`; frontend still treats it as failure |
 | UI recovery | Error message appears; Try Again opens the image picker |
 
-## Slide 2: review, print submission and completion
+## Slide 2: payment (Stripe Terminal)
+
+### 1. The Payment step connects to a reader
+
+Mounting Step 5 calls `connectToReader()` in `src/payment.ts`, which creates a Stripe Terminal SDK instance (`@stripe/terminal-js`) and supplies `onFetchConnectionToken`, backed by `POST /api/payment/connection_token`. That route calls `stripe.terminal.ConnectionToken.create()` server-side — the Stripe secret key never reaches the browser.
+
+The SDK then calls `discoverReaders({ simulated: true })` and `connectReader(...)`. This is Stripe's own reader simulator, so the flow works with no physical hardware. The UI shows connecting, then ready. Swapping to a real S700 reader is a one-line change (`discoverReaders({ location: '<Stripe Location ID>' })`) — nothing else in `payment.ts` or `scanner_api.py` changes for that swap.
+
+### 2. Selecting "Pay & Print" opens a charge
+
+`handlePaymentAndPrint()` in `App.tsx` calls `chargeCard(RENEWAL_FEE_CENTS)`. This posts to `POST /api/payment/create_intent`, which calls `stripe.PaymentIntent.create()` with `capture_method: 'manual'` — the card is authorized but no money moves yet. The route returns a `client_secret` used by the next step.
+
+### 3. The reader collects and confirms the card
+
+`collectPaymentMethod(client_secret)` and `processPayment(...)` run against the (simulated, for now) reader. In test mode, `payment.ts` also calls `setSimulatorConfiguration({ testCardNumber: '4242424242424242' })` immediately beforehand — this call does not exist for a real reader and is removed when real hardware is used.
+
+### 4. Flask captures the payment
+
+`POST /api/payment/capture_intent` calls `stripe.PaymentIntent.capture()` — this is the moment funds actually move. A `status: 'succeeded'` response is required before the frontend proceeds; any other outcome returns `{ success: false, error }` from `chargeCard()`, and nothing is printed.
+
+### 5. No double-charging on a print retry
+
+`App.tsx` stores the completed `paymentIntentId` in `pendingPaymentIntentId` once a charge succeeds. If printing (Slide 3) then fails, a retry reuses that same ID instead of calling `chargeCard()` again — the customer is not charged twice for one renewal. This value clears only once printing succeeds.
+
+## Slide 3: review, print submission and completion
 
 ### 1. Review updates local state
 
@@ -63,11 +87,11 @@ The Review screen edits the same parent React state used by the earlier form ste
 
 ### 2. The final action assembles a print request
 
-`handlePaymentAndPrint()` generates a `REG-` confirmation string using `Math.random()`, sets `printing = true`, clears any previous print error and calls `printRegistration(payload)`.
+Once `chargeCard()` (Slide 2) succeeds, `handlePaymentAndPrint()` generates a `REG-` confirmation string using `Math.random()`, sets the payment stage to `printing`, clears any previous error, and calls `printRegistration(payload)`.
 
-The JSON payload includes `registrant`, `license_plate`, `vehicle_year`, `vehicle_make`, `vehicle_model`, `vin`, `amount` and `confirmation_number`. The amount is the fixed demo value `$71.00`. Card number, CVV and other payment fields are not included in this request. There is no payment gateway call or card authorization.
+The JSON payload includes `registrant`, `license_plate`, `vehicle_year`, `vehicle_make`, `vehicle_model`, `vin`, `amount` and `confirmation_number`. The amount is the fixed value `$71.00`. Card number and other payment details are never included in this request — printing only knows that payment already succeeded, not how.
 
-The React button disables itself while the request is pending. This prevents another click during that pending request, but it is not server-side duplicate-job protection or idempotency.
+The React button disables itself while either the charge or the print request is pending. This prevents another click during that window, but it is not server-side duplicate-job protection or idempotency beyond the `pendingPaymentIntentId` reuse described in Slide 2.
 
 ### 3. Flask validates minimum print fields
 
@@ -79,30 +103,36 @@ The React button disables itself while the request is pending. This prevents ano
 
 The service captures the command output and removes the temporary print file in `finally`. A missing `lp` command, command failure or timeout raises `PrinterError`, which the API maps to HTTP 503.
 
-### 5. A successful response completes the UI flow
+### 5. A successful response completes the UI flow, then logs to Monday.com
 
-When the print command succeeds, Flask returns `success: true`, a message and the job output. React stores the confirmation number and sets `submitted = true`, showing the completion screen. `printing` resets to false in the frontend's `finally` block.
+When the print command succeeds, Flask returns `success: true`, a message and the job output. React stores the confirmation number and sets `submitted = true`, showing the completion screen. The payment stage resets to idle in the frontend's `finally` block.
 
-This verifies print-job submission only. The application does not monitor printer paper movement or physical completion. The UI's “Payment verified” wording is not backed by payment processing.
+React then calls `createMondayRecord(...)` (from `src/monday.ts`), which posts to `POST /api/monday/create_record`. This runs after the customer-facing flow is already complete and does not block or affect it — a Monday.com failure only logs a console warning. Until `MONDAY_API_TOKEN`, `MONDAY_BOARD_ID`, and the real column IDs in `monday_service.py`'s `MONDAY_COLUMN_MAP` are configured, this call returns a clear "not configured yet" error rather than failing silently.
+
+This verifies print-job submission only. The application does not monitor printer paper movement or physical completion. The UI's "Payment verified" wording is now accurate — payment is real — but print completion itself is still only submission-verified, not physically confirmed.
 
 ### 6. Error and reset paths
 
-On an API or print failure, React sets `printError`, keeps the Payment screen visible and re-enables the button. A retry generates another confirmation string and submits another request.
+On a charge failure, React never reaches the print step — the error shows immediately on Payment. On a print failure (after a successful charge), React sets `printError`, keeps the Payment screen visible, and re-enables the button; a retry reprints using the already-completed charge (see Slide 2, step 5) rather than billing again.
 
-Start Next Customer clears personal, license, insurance and payment state, resets confirmation and error state, and returns to step 1. It retains the frontend operator sign-in state.
+Start Next Customer clears personal, license, insurance and payment state, resets confirmation, error, and the pending-charge tracking, and returns to step 1. It retains the frontend operator sign-in state.
 
 ## Supporting health endpoint
 
-`GET /api/health` returns `status: ok`, camera configuration information and printer status. Camera information describes the selected backend and settings; printer availability checks whether `lp` exists. This endpoint is not proof of a successful camera capture or physical printer readiness, and it is not a gate in the customer flow.
+`GET /api/health` returns `status: ok`, camera configuration information and printer status. Camera information describes the selected backend and settings; printer availability checks whether `lp` exists. This endpoint is not proof of a successful camera capture or physical printer readiness, and it is not a gate in the customer flow. It does not report Stripe or Monday.com configuration status.
 
 ## Short technical narration
 
-“The kiosk browser runs a React application backed by a local Flask API. A scan request either captures a temporary image through the Raspberry Pi camera adapter or accepts an uploaded image. License images use PDF417 decoding and AAMVA parsing, while insurance documents use OpenCV preprocessing and Tesseract OCR. Flask normalizes the extracted fields and returns JSON, which React merges into editable form state. After review, the final demo action sends registration data to the print endpoint. The backend checks the minimum print fields, builds a labeled mockup and submits it through CUPS. A successful submission triggers the confirmation screen; failures remain recoverable in the UI. Payment processing and registration persistence are not connected in this version.”
+"The kiosk browser runs a React application backed by a local Flask API. A scan request either captures a temporary image through the Raspberry Pi camera adapter or accepts an uploaded image. License images use PDF417 decoding and AAMVA parsing, while insurance documents use OpenCV preprocessing and Tesseract OCR. Flask normalizes the extracted fields and returns JSON, which React merges into editable form state. After review, the customer's card is charged through a real Stripe Terminal flow — a simulated reader for this demo, a physical S700 reader with a one-line change — using manual capture, so funds only move after the reader confirms the card. Only once that charge succeeds does the app send registration data to the print endpoint, which checks the minimum print fields, builds a labeled mockup and submits it through CUPS. A successful submission triggers the confirmation screen and a background log to Monday.com; failures remain recoverable in the UI, and a print retry after a successful charge never re-bills the card."
 
 ## Implementation references
 
-- `integrated-kiosk/src/App.tsx`: frontend scan helpers, field mapping, review, print payload and state transitions.
-- `integrated-kiosk/scanner_api.py`: Flask routes, normalization, temporary images and status codes.
+- `integrated-kiosk/src/App.tsx`: frontend scan helpers, field mapping, review, payment/print orchestration, and state transitions.
+- `integrated-kiosk/src/payment.ts`: Stripe Terminal SDK connection and charge flow.
+- `integrated-kiosk/src/monday.ts`: Monday.com logging call.
+- `integrated-kiosk/scanner_api.py`: Flask routes, normalization, temporary images and status codes (scan, print, payment, and Monday.com routes).
+- `integrated-kiosk/payment_service.py`: Stripe Python SDK calls (connection tokens, PaymentIntent create/capture).
+- `integrated-kiosk/monday_service.py`: Monday.com GraphQL request and column-value mapping.
 - `integrated-kiosk/camera_capture.py`: capture locking, backend selection and camera commands.
 - `integrated-kiosk/driver_license_barcode_rev4.py`: PDF417 scanning and AAMVA extraction.
 - `integrated-kiosk/insurance_card_ocr_rev3.py`: OCR variants, field scoring and success threshold.

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
@@ -14,7 +15,10 @@ from driver_license_barcode_rev4 import AAMVAParser, DriverLicenseBarcodeScanner
 from insurance_card_ocr_rev3 import InsuranceCardOCR, InsuranceCardOCRConfig
 from camera_capture import CameraError, KioskCamera
 from printer_service import PrinterError, print_registration_mockup, printer_status
+from payment_service import PaymentError, create_connection_token, create_payment_intent, capture_payment_intent
+from monday_service import MondayError, create_monday_record
 
+load_dotenv()
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DIST_DIR = PROJECT_DIR / "dist"
@@ -155,6 +159,77 @@ def print_registration():
         return jsonify(success=True, message="Mock registration sent to printer.", job=job)
     except PrinterError as exc:
         return jsonify(error=str(exc)), 503
+
+
+# --- Payment (Stripe Terminal) -------------------------------------------
+#
+# Three routes, called in this order by a payment:
+#   1. /api/payment/connection_token - authenticates the card reader
+#   2. /api/payment/create_intent    - opens a charge for an amount
+#   3. /api/payment/capture_intent   - finalizes the charge after the
+#                                      reader confirms the card
+# The actual Stripe calls live in payment_service.py; these routes just
+# translate between HTTP/JSON and that module.
+
+
+@app.post("/api/payment/connection_token")
+def payment_connection_token():
+    try:
+        secret = create_connection_token()
+        return jsonify(secret=secret)
+    except PaymentError as exc:
+        return jsonify(error=str(exc)), 500
+
+
+@app.post("/api/payment/create_intent")
+def payment_create_intent():
+    payload = request.get_json(silent=True) or {}
+    try:
+        amount = int(payload.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify(error="amount must be a whole number of cents"), 400
+
+    receipt_email = payload.get("receiptEmail") or None
+
+    try:
+        intent = create_payment_intent(amount, receipt_email=receipt_email)
+        return jsonify(**intent)
+    except PaymentError as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/payment/capture_intent")
+def payment_capture_intent():
+    payload = request.get_json(silent=True) or {}
+    payment_intent_id = payload.get("paymentIntentId")
+    if not payment_intent_id:
+        return jsonify(error="paymentIntentId is required"), 400
+
+    try:
+        result = capture_payment_intent(payment_intent_id)
+        return jsonify(**result)
+    except PaymentError as exc:
+        return jsonify(error=str(exc)), 500
+
+
+# --- Monday.com record-keeping --------------------------------------------
+#
+# Separate from the payment routes on purpose - the frontend calls this
+# AFTER a payment succeeds, and a failure here shouldn't be able to
+# undo or block a payment that already went through.
+
+
+@app.post("/api/monday/create_record")
+def monday_create_record():
+    payload = request.get_json(silent=True) or {}
+    item_name = payload.get("itemName")
+    fields = payload.get("fields") or {}
+
+    try:
+        item_id = create_monday_record(item_name, fields)
+        return jsonify(success=True, itemId=item_id)
+    except MondayError as exc:
+        return jsonify(error=str(exc)), 400 if "required" in str(exc) else 500
 
 
 @app.get("/")

@@ -1,4 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import { chargeCard, connectToReader } from "./payment";
+import { createMondayRecord } from "./monday";
 
 type Step = 1 | 2 | 3 | 4 | 5;
 
@@ -35,15 +37,6 @@ interface InsuranceInfo {
   coverageType: string;
   agentName: string;
   agentPhone: string;
-}
-
-interface PaymentInfo {
-  cardNumber: string;
-  cardHolder: string;
-  expiry: string;
-  cvv: string;
-  billingZip: string;
-  method: "card" | "debit";
 }
 
 interface LicenseScanFields {
@@ -134,6 +127,11 @@ async function printRegistration(payload: RegistrationPrintPayload): Promise<voi
     throw new Error(result.error || "The registration mockup could not be printed.");
   }
 }
+
+// The actual amount charged on the card reader, in cents. Keep this in
+// sync with the fee breakdown shown in Step5 and the amount sent to
+// the print service below.
+const RENEWAL_FEE_CENTS = 7100; // $71.00
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -716,54 +714,50 @@ function Step3({
   );
 }
 
-function formatCardNumber(val: string) {
-  return val.replace(/\D/g, "").slice(0, 16).replace(/(.{4})/g, "$1 ").trim();
-}
+function Step5({ amountCents }: { amountCents: number }) {
+  const [readerStatus, setReaderStatus] = useState<"connecting" | "ready" | "error">("connecting");
+  const [readerError, setReaderError] = useState("");
 
-function formatExpiry(val: string) {
-  const digits = val.replace(/\D/g, "").slice(0, 4);
-  if (digits.length >= 3) return digits.slice(0, 2) + "/" + digits.slice(2);
-  return digits;
-}
+  useEffect(() => {
+    let cancelled = false;
+    setReaderStatus("connecting");
+    connectToReader()
+      .then(() => {
+        if (!cancelled) setReaderStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setReaderStatus("error");
+          setReaderError(error instanceof Error ? error.message : "Could not connect to the card reader.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-function CardIcon({ type }: { type: string }) {
-  const colors: Record<string, { bg: string; text: string; label: string }> = {
-    "4": { bg: "#1a1f71", text: "#ffffff", label: "VISA" },
-    "5": { bg: "#eb001b", text: "#ffffff", label: "MC" },
-    "3": { bg: "#2557d6", text: "#ffffff", label: "AMEX" },
-    "6": { bg: "#f7941d", text: "#ffffff", label: "DISC" },
-  };
-  const match = colors[type[0]] ?? { bg: "var(--muted)", text: "var(--muted-foreground)", label: "CARD" };
-  return (
-    <div className="rounded px-1.5 py-0.5 text-xs font-bold" style={{ backgroundColor: match.bg, color: match.text, fontFamily: "monospace", letterSpacing: "0.03em" }}>
-      {match.label}
-    </div>
-  );
-}
-
-function Step5({
-  data,
-  onChange,
-}: {
-  data: PaymentInfo;
-  onChange: (d: PaymentInfo) => void;
-}) {
-  const set = (k: keyof PaymentInfo) => (val: string) =>
-    onChange({ ...data, [k]: val });
-
-  const rawDigits = data.cardNumber.replace(/\D/g, "");
+  const statusColor =
+    readerStatus === "ready" ? "#1b7a4c" : readerStatus === "error" ? "#b42318" : "#c9a227";
+  const statusText =
+    readerStatus === "connecting"
+      ? "Connecting to card reader..."
+      : readerStatus === "ready"
+      ? "Reader ready — tap, insert, or swipe"
+      : readerError || "Could not connect to the card reader.";
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Test card notice */}
+      {/* Test reader notice */}
       <div className="rounded-lg p-4 flex gap-3" style={{ backgroundColor: "#fffbea", border: "1px solid #f5d76e" }}>
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none" className="mt-0.5 shrink-0">
           <path d="M9 2L16 15H2L9 2z" stroke="#b45309" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
           <path d="M9 7v4M9 12.5h.01" stroke="#b45309" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
         <div>
-          <p className="text-sm font-semibold" style={{ color: "#b45309" }}>Demo Mode — Test Card</p>
-          <p className="text-xs mt-0.5" style={{ color: "#92400e" }}>Use card number <span className="font-mono font-bold">4242 4242 4242 4242</span>, any future expiry, and any 3-digit CVV.</p>
+          <p className="text-sm font-semibold" style={{ color: "#b45309" }}>Demo Mode — Simulated Reader</p>
+          <p className="text-xs mt-0.5" style={{ color: "#92400e" }}>
+            No physical card needed yet. Selecting "Pay &amp; Print" below runs a real (test-mode) Stripe charge against a simulated card reader.
+          </p>
         </div>
       </div>
 
@@ -786,90 +780,36 @@ function Step5({
           ))}
           <div className="flex justify-between py-3">
             <span className="text-sm font-semibold">Total Due</span>
-            <span className="text-base font-bold" style={{ color: "var(--primary)" }}>$71.00</span>
+            <span className="text-base font-bold" style={{ color: "var(--primary)" }}>${(amountCents / 100).toFixed(2)}</span>
           </div>
         </div>
       </div>
 
-      {/* Payment method toggle */}
-      <div className="flex gap-3">
-        {(["card", "debit"] as const).map((m) => (
-          <button
-            key={m}
-            onClick={() => set("method")(m)}
-            className="flex-1 py-2.5 rounded-md text-sm font-medium transition-all duration-150"
-            style={{
-              border: data.method === m ? "2px solid var(--primary)" : "1.5px solid var(--border)",
-              backgroundColor: data.method === m ? "var(--secondary)" : "var(--card)",
-              color: data.method === m ? "var(--primary)" : "var(--muted-foreground)",
-            }}
-          >
-            {m === "card" ? "Credit Card" : "Debit Card"}
-          </button>
-        ))}
-      </div>
-
-      {/* Card form */}
-      <div className="flex flex-col gap-5">
-        <Field label="Card Number" required>
-          <div className="relative">
-            <InputEl
-              placeholder="4242 4242 4242 4242"
-              value={data.cardNumber}
-              inputMode="numeric"
-              onChange={(e) => set("cardNumber")(formatCardNumber(e.target.value))}
-            />
-            {rawDigits.length > 0 && (
-              <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                <CardIcon type={rawDigits} />
-              </div>
-            )}
-          </div>
-        </Field>
-        <Field label="Cardholder Name" required>
-          <InputEl
-            placeholder="Margaret Sullivan"
-            value={data.cardHolder}
-            onChange={(e) => set("cardHolder")(e.target.value)}
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-5">
-          <Field label="Expiry" required hint="MM/YY">
-            <InputEl
-              placeholder="12/27"
-              value={data.expiry}
-              inputMode="numeric"
-              onChange={(e) => set("expiry")(formatExpiry(e.target.value))}
-            />
-          </Field>
-          <Field label="CVV" required hint={rawDigits[0] === "3" ? "4 digits on front" : "3 digits on back"}>
-            <InputEl
-              placeholder={rawDigits[0] === "3" ? "1234" : "123"}
-              value={data.cvv}
-              inputMode="numeric"
-              maxLength={rawDigits[0] === "3" ? 4 : 3}
-              onChange={(e) => set("cvv")(e.target.value.replace(/\D/g, "").slice(0, 4))}
-              type="password"
-            />
-          </Field>
+      {/* Reader status */}
+      <div
+        className="rounded-lg p-5 flex items-center gap-3"
+        style={{
+          border: `1.5px solid ${readerStatus === "error" ? "#f2b8b5" : "var(--border)"}`,
+          backgroundColor: readerStatus === "ready" ? "#eef6f1" : "var(--card)",
+        }}
+      >
+        <span className="shrink-0 rounded-full" style={{ width: 10, height: 10, backgroundColor: statusColor }} />
+        <div>
+          <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>{statusText}</p>
+          {readerStatus === "ready" && (
+            <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+              Select "Pay & Print" below once the customer presents their card.
+            </p>
+          )}
         </div>
-        <Field label="Billing ZIP Code" required>
-          <InputEl
-            placeholder="78701"
-            value={data.billingZip}
-            inputMode="numeric"
-            maxLength={10}
-            onChange={(e) => set("billingZip")(e.target.value.replace(/\D/g, "").slice(0, 5))}
-          />
-        </Field>
       </div>
 
       {/* Security badges */}
       <div className="flex items-center justify-center gap-5 pt-2">
         {[
-          { icon: "🔒", label: "256-bit SSL" },
-          { icon: "🛡️", label: "PCI Compliant" },
-          { icon: "✓", label: "Secure Checkout" },
+          { icon: "🔒", label: "PCI-Compliant Reader" },
+          { icon: "🛡️", label: "Stripe Terminal" },
+          { icon: "✓", label: "Card Never Touches This Screen" },
         ].map((b) => (
           <div key={b.label} className="flex items-center gap-1.5">
             <span className="text-sm">{b.icon}</span>
@@ -880,6 +820,7 @@ function Step5({
     </div>
   );
 }
+
 
 function EditableRow({
   label,
@@ -1137,13 +1078,10 @@ export default function App() {
   const [authed, setAuthed] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [submitted, setSubmitted] = useState(false);
-  const [printing, setPrinting] = useState(false);
+  const [paymentStage, setPaymentStage] = useState<"idle" | "charging" | "printing">("idle");
+  const [pendingPaymentIntentId, setPendingPaymentIntentId] = useState<string | null>(null);
   const [printError, setPrintError] = useState("");
   const [confirmationNumber, setConfirmationNumber] = useState("");
-
-  const [payment, setPayment] = useState<PaymentInfo>({
-    cardNumber: "", cardHolder: "", expiry: "", cvv: "", billingZip: "", method: "card",
-  });
 
   const [personal, setPersonal] = useState<PersonalInfo>({
     firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "",
@@ -1193,13 +1131,31 @@ export default function App() {
     2: "Confirm the details extracted from your driver's license.",
     3: "Scan your insurance document to fill vehicle details, then review the insurance information.",
     4: "Review all information before proceeding to payment.",
-    5: "Complete your $71.00 renewal payment securely.",
+    5: "Tap, insert, or swipe your card to complete the $71.00 renewal payment.",
   };
 
   const handlePaymentAndPrint = async () => {
-    const confirmation = `REG-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    setPrinting(true);
     setPrintError("");
+
+    // If a previous attempt already charged the card and only printing
+    // failed, reuse that charge instead of charging again - otherwise
+    // a print retry would double-charge the customer.
+    let paymentIntentId = pendingPaymentIntentId;
+
+    if (!paymentIntentId) {
+      setPaymentStage("charging");
+      const chargeResult = await chargeCard(RENEWAL_FEE_CENTS, personal.email || undefined);
+      if (!chargeResult.success) {
+        setPrintError(chargeResult.error);
+        setPaymentStage("idle");
+        return;
+      }
+      paymentIntentId = chargeResult.paymentIntentId;
+      setPendingPaymentIntentId(paymentIntentId);
+    }
+
+    const confirmation = `REG-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    setPaymentStage("printing");
     try {
       await printRegistration({
         registrant: `${personal.firstName} ${personal.lastName}`.trim(),
@@ -1213,10 +1169,31 @@ export default function App() {
       });
       setConfirmationNumber(confirmation);
       setSubmitted(true);
+      setPendingPaymentIntentId(null); // this renewal is fully done
+
+      // Log the completed renewal to Monday.com. This runs after the
+      // customer-facing flow is already done - a logging hiccup here
+      // shouldn't hold up the customer or look like the payment
+      // failed, since the payment already succeeded.
+      createMondayRecord(`${license.licensePlate} renewal`, {
+        plate: license.licensePlate,
+        registrant: `${personal.firstName} ${personal.lastName}`.trim(),
+        amount: RENEWAL_FEE_CENTS,
+        confirmationNumber: confirmation,
+        paymentIntentId,
+      }).then((mondayResult) => {
+        if (mondayResult.success) {
+          console.log(`Logged to Monday.com: item ${mondayResult.itemId}`);
+        } else {
+          console.warn(`Monday.com logging skipped: ${mondayResult.error}`);
+        }
+      });
     } catch (error) {
+      // The card was already charged - pendingPaymentIntentId stays
+      // set so the next click retries only the print, not the charge.
       setPrintError(error instanceof Error ? error.message : "Printing failed. Please try again.");
     } finally {
-      setPrinting(false);
+      setPaymentStage("idle");
     }
   };
 
@@ -1328,7 +1305,7 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => { setSubmitted(false); setConfirmationNumber(""); setPrintError(""); setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPayment({ cardNumber: "", cardHolder: "", expiry: "", cvv: "", billingZip: "", method: "card" }); }}
+              onClick={() => { setSubmitted(false); setConfirmationNumber(""); setPrintError(""); setPendingPaymentIntentId(null); setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); }}
               className="px-8 py-3 rounded-lg text-sm font-semibold transition-all duration-150"
               style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#142e4a"; }}
@@ -1375,7 +1352,7 @@ export default function App() {
           {step === 2 && <Step2 data={license} onChange={setLicense} />}
           {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicle={license} onVehicleChange={setLicense} onVehicleScan={handleInsuranceVehicleScan} />}
           {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
-          {step === 5 && <Step5 data={payment} onChange={setPayment} />}
+          {step === 5 && <Step5 amountCents={RENEWAL_FEE_CENTS} />}
         </div>
 
         <div className="flex items-center justify-between">
@@ -1423,13 +1400,17 @@ export default function App() {
           ) : (
             <button
               onClick={handlePaymentAndPrint}
-              disabled={printing}
+              disabled={paymentStage !== "idle"}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
-              style={{ backgroundColor: "#3a7d44", color: "#ffffff", opacity: printing ? 0.7 : 1 }}
+              style={{ backgroundColor: "#3a7d44", color: "#ffffff", opacity: paymentStage !== "idle" ? 0.7 : 1 }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2d6636"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#3a7d44"; }}
             >
-              {printing ? "Sending to Printer..." : "Pay $71.00 & Print"}
+              {paymentStage === "charging"
+                ? "Processing Payment..."
+                : paymentStage === "printing"
+                ? "Sending to Printer..."
+                : "Pay $71.00 & Print"}
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
