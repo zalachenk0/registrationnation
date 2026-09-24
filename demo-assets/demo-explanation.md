@@ -52,8 +52,6 @@ When the print service accepts the job, the app shows its completion screen and 
 
 Print acceptance does not confirm that paper has physically finished printing. The UI's completion wording is stronger than what the backend verifies, so describe this transition as the print job being accepted.
 
-After the completion screen appears, the app also sends the completed renewal to the company's Monday.com board in the background (non-blocking — it doesn't hold up the customer, and a logging failure there doesn't affect the payment or print result). This step reports a clear "not configured yet" message until Monday.com credentials are set up; describe it as an in-progress integration if it hasn't been configured for the demo.
-
 Selecting **Start Next Customer** resets personal, license, insurance and payment state, clears the confirmation and returns to step 1 while retaining the operator session.
 
 Demo narration: "Once the printer accepts the job, the kiosk displays a confirmation number and logs the renewal to our tracking board. We collect the demo output, then select Start Next Customer to clear the form for the next person."
@@ -74,7 +72,7 @@ Demo narration: "Once the printer accepts the job, the kiosk displays a confirma
 4. Scan a test insurance document and complete remaining vehicle/policy fields.
 5. On Review, intentionally correct one field to demonstrate customer control.
 6. Let the reader connect (watch the status change to "ready"), then select **Pay $71.00 & Print**.
-7. Show the confirmation screen, the physical demonstration output, and (if configured) the new row appearing on Monday.com.
+7. Show the confirmation screen and the physical demonstration output.
 8. Select Start Next Customer to demonstrate reset.
 
 Use the PNG as a full-slide image in a 16:9 deck. The SVG preserves crisp text and lines when resized in slide software that supports SVG.
@@ -83,6 +81,5 @@ Use the PNG as a full-slide image in a 16:9 deck. The SVG preserves crisp text a
 
 - `integrated-kiosk/src/App.tsx`: screen order, scanner mapping, edits, payment step, print submission and session reset.
 - `integrated-kiosk/src/payment.ts`: Stripe Terminal SDK connection and charge flow.
-- `integrated-kiosk/src/monday.ts`: Monday.com logging call.
-- `integrated-kiosk/SCANNER_SETUP.md`: camera capture, license barcode decoding, insurance OCR, and payment/Monday.com configuration.
+- `integrated-kiosk/SCANNER_SETUP.md`: camera capture, license barcode decoding, insurance OCR, and payment configuration.
 - `integrated-kiosk/printer_service.py`: demo output content and print-job acceptance behavior.

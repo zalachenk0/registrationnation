@@ -16,7 +16,6 @@ from insurance_card_ocr_rev3 import InsuranceCardOCR, InsuranceCardOCRConfig
 from camera_capture import CameraError, KioskCamera
 from printer_service import PrinterError, print_registration_mockup, printer_status
 from payment_service import PaymentError, create_connection_token, create_payment_intent, capture_payment_intent
-from monday_service import MondayError, create_monday_record
 
 load_dotenv()
 
@@ -210,26 +209,6 @@ def payment_capture_intent():
         return jsonify(**result)
     except PaymentError as exc:
         return jsonify(error=str(exc)), 500
-
-
-# --- Monday.com record-keeping --------------------------------------------
-#
-# Separate from the payment routes on purpose - the frontend calls this
-# AFTER a payment succeeds, and a failure here shouldn't be able to
-# undo or block a payment that already went through.
-
-
-@app.post("/api/monday/create_record")
-def monday_create_record():
-    payload = request.get_json(silent=True) or {}
-    item_name = payload.get("itemName")
-    fields = payload.get("fields") or {}
-
-    try:
-        item_id = create_monday_record(item_name, fields)
-        return jsonify(success=True, itemId=item_id)
-    except MondayError as exc:
-        return jsonify(error=str(exc)), 400 if "required" in str(exc) else 500
 
 
 @app.get("/")

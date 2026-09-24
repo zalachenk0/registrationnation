@@ -28,9 +28,7 @@ permission.
    real Stripe charge, run in Stripe's test mode.
 3. Only once the payment succeeds does the UI call `POST /api/print/registration`,
    same as before.
-4. After a successful print, the UI calls `POST /api/monday/create_record` to log
-   the renewal to the company's Monday.com board (optional - see setup below).
-5. If printing fails after a successful charge, retrying reuses that same charge
+4. If printing fails after a successful charge, retrying reuses that same charge
    instead of charging the card again (`pendingPaymentIntentId` in `App.tsx`).
 
 ## 1. Confirm the CSI Arducam works
@@ -86,7 +84,7 @@ pnpm build
 `pnpm install` pulls in `@stripe/terminal-js` automatically - it's listed in
 `package.json`, no separate install step needed.
 
-## 3. Configure payment (Stripe) and Monday.com
+## 3. Configure payment (Stripe)
 
 ```bash
 cp .env.example .env
@@ -97,22 +95,17 @@ Open `.env` and fill in:
 - **`STRIPE_SECRET_KEY`** (required to take payments) - a free test-mode key from
   https://dashboard.stripe.com/test/apikeys (starts with `sk_test_`). Test mode
   needs no business verification or bank account.
-- **`MONDAY_API_TOKEN`** and **`MONDAY_BOARD_ID`** (optional - only needed for the
-  Monday.com logging step) - get these from whoever manages the board: the token
-  from Monday.com's Admin -> API page, and the board ID from the number in the
-  board's URL.
-
-Then open `monday_service.py` and replace the placeholder values in
-`MONDAY_COLUMN_MAP` with the board's real column IDs (Monday identifies columns by
-an internal ID like `text` or `status4`, not the column's display name - find these
-in the board's column settings). Until this is done, `/api/monday/create_record`
-returns a clear "not configured yet" error instead of failing silently.
 
 The reader itself needs no setup for this demo - `src/payment.ts` uses Stripe's
 built-in reader simulator (`discoverReaders({ simulated: true })`), so payments
 work with no physical hardware attached. When the physical S700 arrives, that's
 the one line in `src/payment.ts` that changes (swap it for a real Stripe Location
 ID) - everything else, including every route in `scanner_api.py`, stays the same.
+
+> Monday.com record-keeping (logging each completed renewal to a company board)
+> is built but deliberately not wired into this demo - see
+> `saved-for-later/monday-integration/` for that code and instructions to bring
+> it back in for a future demo.
 
 ## 4. Run and test
 

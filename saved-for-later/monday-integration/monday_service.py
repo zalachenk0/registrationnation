@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-"""Logs a completed renewal to the company's Monday.com board.
-
-Kept separate from payment_service.py on purpose: a failed Monday.com
-write should never be able to affect a payment that already succeeded.
-The route in scanner_api.py calls this AFTER a payment completes, not
-before or during.
-"""
+# Logs a completed renewal to the company's Monday.com board.
+#
+# Kept separate from payment_service.py on purpose: a failed Monday.com
+# write should never be able to affect a payment that already succeeded.
+# The route in scanner_api.py calls this AFTER a payment completes, not
+# before or during.
 
 import os
 from typing import Any
@@ -31,15 +30,15 @@ MONDAY_COLUMN_MAP = {
 }
 
 
+# Monday.com wasn't configured, or rejected the write.
 class MondayError(RuntimeError):
-    """Monday.com wasn't configured, or rejected the write."""
+    pass
 
 
 def create_monday_record(item_name: str, fields: dict[str, Any]) -> str:
-    """Creates one item (row) on the configured Monday.com board.
-    Returns the new item's ID. Raises MondayError if Monday.com isn't
-    configured yet or the API rejects the request.
-    """
+    # Creates one item (row) on the configured Monday.com board.
+    # Returns the new item's ID. Raises MondayError if Monday.com isn't
+    # configured yet or the API rejects the request.
     api_token = os.getenv("MONDAY_API_TOKEN")
     board_id = os.getenv("MONDAY_BOARD_ID")
 

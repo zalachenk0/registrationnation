@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from "react";
 import { chargeCard, connectToReader } from "./payment";
-import { createMondayRecord } from "./monday";
 
 type Step = 1 | 2 | 3 | 4 | 5;
 
@@ -1170,24 +1169,6 @@ export default function App() {
       setConfirmationNumber(confirmation);
       setSubmitted(true);
       setPendingPaymentIntentId(null); // this renewal is fully done
-
-      // Log the completed renewal to Monday.com. This runs after the
-      // customer-facing flow is already done - a logging hiccup here
-      // shouldn't hold up the customer or look like the payment
-      // failed, since the payment already succeeded.
-      createMondayRecord(`${license.licensePlate} renewal`, {
-        plate: license.licensePlate,
-        registrant: `${personal.firstName} ${personal.lastName}`.trim(),
-        amount: RENEWAL_FEE_CENTS,
-        confirmationNumber: confirmation,
-        paymentIntentId,
-      }).then((mondayResult) => {
-        if (mondayResult.success) {
-          console.log(`Logged to Monday.com: item ${mondayResult.itemId}`);
-        } else {
-          console.warn(`Monday.com logging skipped: ${mondayResult.error}`);
-        }
-      });
     } catch (error) {
       // The card was already charged - pendingPaymentIntentId stays
       // set so the next click retries only the print, not the charge.
