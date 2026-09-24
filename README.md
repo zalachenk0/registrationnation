@@ -1,2 +1,0 @@
-# registrationnation
-registration kiosk
