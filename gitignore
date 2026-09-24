@@ -1,0 +1,37 @@
+# --- Secrets (never commit these) -----------------------------------------
+.env
+# .env.example is fine to commit - it has no real secrets, just placeholders
+
+# --- Node / Vite / pnpm ------------------------------------------------
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+# pnpm-lock.yaml is intentionally NOT ignored - keep it committed so
+# everyone installs the exact same dependency versions.
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- Kiosk runtime logs (created by Start-Kiosk.ps1 / gunicorn) ---------
+kiosk-ui.log
+kiosk-ui-error.log
+kiosk-api.log
+kiosk-api-error.log
+
+# --- Figma Make tooling (dev-only preview, not part of the shipped app) -
+.figma/
+
+# --- OS / editor cruft -----------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
