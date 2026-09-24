@@ -160,19 +160,10 @@ def print_registration():
         return jsonify(error=str(exc)), 503
 
 
-# --- Payment (Stripe Terminal) -------------------------------------------
-#
-# Three routes, called in this order by a payment:
-#   1. /api/payment/connection_token - authenticates the card reader
-#   2. /api/payment/create_intent    - opens a charge for an amount
-#   3. /api/payment/capture_intent   - finalizes the charge after the
-#                                      reader confirms the card
-# The actual Stripe calls live in payment_service.py; these routes just
-# translate between HTTP/JSON and that module.
+# payment backend portion
 
-
-@app.post("/api/payment/connection_token")
-def payment_connection_token():
+@app.post("/api/payment/connection_token") # actual stripe calls are in payment_service.py
+def payment_connection_token():            # this just translates between HTTP/JSON for that file
     try:
         secret = create_connection_token()
         return jsonify(secret=secret)
@@ -209,7 +200,8 @@ def payment_capture_intent():
         return jsonify(**result)
     except PaymentError as exc:
         return jsonify(error=str(exc)), 500
-
+        
+# payment portion end 
 
 @app.get("/")
 def serve_ui():
