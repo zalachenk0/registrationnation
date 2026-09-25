@@ -1,9 +1,8 @@
-// payment.ts
+// payment.ts, browser side
 //
-// Handles taking a card payment on the Stripe Terminal card reader.
-// This is the payment system's entire surface area for the rest of
-// the app: call chargeCard(amountCents) and check the result. Pass a
-// second argument to also have Stripe email an official receipt:
+// takes the card payment on the stripe terminal
+// calls chargeCard(amountCents) and checks the result. 
+// also has a second argument to also have stripe email an official receipt:
 //   chargeCard(7100, customerEmail)
 //
 // This talks to our own Flask backend (scanner_api.py) at /api/payment/*,
@@ -103,26 +102,26 @@ export async function chargeCard(
       throw new Error(intent.error || "Could not start the payment.");
     }
 
-    // Step 2: test mode only. Tells the fake reader which test card to
-    // pretend was used. Delete this block once using the real S700 -
-    // a real card supplies its own data when it's tapped.
+    // Step 2: test mode only, tells the simulated reader which test card to
+    // pretend was used. this block is to be deleted when the real terminal
+    // is implemented
     if (terminal.setSimulatorConfiguration) {
       terminal.setSimulatorConfiguration({ testCardNumber: "4242424242424242" });
     }
 
-    // Step 3: the reader reads the card.
+    // Step 3: the reader reads the card
     const collected = await terminal.collectPaymentMethod(intent.client_secret);
     if ("error" in collected) {
       throw new Error(collected.error.message);
     }
 
-    // Step 4: Stripe confirms the card is good to charge.
+    // Step 4: stripe confirms the card is good to charge
     const processed = await terminal.processPayment(collected.paymentIntent);
     if ("error" in processed) {
       throw new Error(processed.error.message);
     }
 
-    // Step 5: now that the card was read successfully, take the money.
+    // Step 5: card was read successfully and takes the money
     const captureResponse = await fetch("/api/payment/capture_intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
