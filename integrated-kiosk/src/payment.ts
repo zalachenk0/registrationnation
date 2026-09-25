@@ -1,24 +1,21 @@
-// payment.ts, browser side
-//
-// takes payment by talking to our stripe server backend (scanner_api.py)
-// calls chargeCard(amountCents) and checks the result
-// also pulls email from form have stripe email a official receipt chargeCard(7100, customerEmail)
-//
-// the browser side and server side are kept separate so that the secret key only lives in the server and not in the browser where it can be stolen from 
-// 
+// Sets up the Stripe reader connection stuff. Runs once, shared everywhere below.
 
 import { loadStripeTerminal } from "@stripe/terminal-js";
 
+// What chargeCard() gives back: either it worked, or here's why it didn't
 type ChargeResult =
   | { success: true; paymentIntentId: string }
   | { success: false; error: string };
 
+// Grabbing the reader's type straight from the SDK so we don't have to write it out
 type StripeTerminalSDK = NonNullable<Awaited<ReturnType<typeof loadStripeTerminal>>>;
 type Terminal = ReturnType<StripeTerminalSDK["create"]>;
 
+// Remembers the reader connection so we don't reconnect every time someone pays
 let terminal: Terminal | null = null;
 let readerIsConnected = false;
 
+// Stripe SDK calls this when it needs a token to connect to the reader
 async function fetchConnectionToken(): Promise<string> {
   const response = await fetch("/api/payment/connection_token", { method: "POST" });
   const data = await response.json();
@@ -28,8 +25,7 @@ async function fetchConnectionToken(): Promise<string> {
   return data.secret;
 }
 
-// connects to the card reader. chargeCard() automatically calls this
-// the first time it's needed and the same connection is used after that
+// Connects to the reader. Runs automatically first time, then reuses the connection
 export async function connectToReader(): Promise<void> {
   if (terminal) {
     return;
@@ -47,9 +43,9 @@ export async function connectToReader(): Promise<void> {
     },
   });
 
-  // { simulated: true } is used to use stripe's simulated reader,
+  // Using the fake reader for now so we can test without hardware
   //
-  // when the real terminal arrives, we'll replace it with:
+  // swap this line when the real terminal shows up:
   //   const discoverResult = await terminal.discoverReaders({ location: "<your Stripe location id>" });
   const discoverResult = await terminal.discoverReaders({ simulated: true });
 
@@ -65,9 +61,7 @@ export async function connectToReader(): Promise<void> {
   readerIsConnected = true;
 }
 
-// this is the main function the app calls
-// we give it a dollar amount in cents like 7100 for $71.00, not 71. 
-// Walks through the reader flow and returns whether it worked.
+// The main function everything calls - give it cents (7100 = $71.00), get back whether it worked
 export async function chargeCard(
   amountCents: number,
   receiptEmail?: string
@@ -80,7 +74,7 @@ export async function chargeCard(
       throw new Error("Card reader is not connected.");
     }
 
-    // Step 1: open a charge on our server. No money has moved yet.
+    // Step 1: start the charge on our server, no money moved yet
     const createResponse = await fetch("/api/payment/create_intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -91,26 +85,24 @@ export async function chargeCard(
       throw new Error(intent.error || "Could not start the payment.");
     }
 
-    // Step 2: test mode only, tells the simulated reader which test card to
-    // pretend was used. this block is to be deleted when the real terminal
-    // is implemented
+    // Step 2: test mode only - tells the fake reader which card to pretend was used
     if (terminal.setSimulatorConfiguration) {
       terminal.setSimulatorConfiguration({ testCardNumber: "4242424242424242" });
     }
 
-    // Step 3: the reader reads the card
+    // Step 3: reader actually reads the card
     const collected = await terminal.collectPaymentMethod(intent.client_secret);
     if ("error" in collected) {
       throw new Error(collected.error.message);
     }
 
-    // Step 4: stripe confirms the card is good to charge
+    // Step 4: Stripe checks the card's good to charge
     const processed = await terminal.processPayment(collected.paymentIntent);
     if ("error" in processed) {
       throw new Error(processed.error.message);
     }
 
-    // Step 5: card was read successfully and takes the money
+    // Step 5: card's good, take the money for real
     const captureResponse = await fetch("/api/payment/capture_intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
