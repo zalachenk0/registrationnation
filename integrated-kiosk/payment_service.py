@@ -1,29 +1,29 @@
-from __future__ import annotations # makes it so that script runs commands when script gets there rather than instantly
+from __future__ import annotations  # runs type hints when needed instead of right away
 
-# stripe Terminal payment backend 
-# imports the Stripe Python SDK and reads STRIPE_SECRET_KEY.
+# Stripe Terminal payment backend - only file that touches the Stripe SDK and secret key
 
 import os
 
 import stripe
 
-class PaymentError(RuntimeError): # if stripe rejects the request or if it wasn't configured
+
+class PaymentError(RuntimeError):  # stripe said no, or we're not set up right
     pass
 
 
-MINIMUM_CHARGE_CENTS = 50  # stripe's minimum for a charge
+MINIMUM_CHARGE_CENTS = 50  # stripe won't let us charge less than this
 
 
 def _client() -> None:
-    secret_key = os.getenv("STRIPE_SECRET_KEY")     # points the stripe module to our secret key
-    if not secret_key:                             
+    secret_key = os.getenv("STRIPE_SECRET_KEY")  # grab our key from .env
+    if not secret_key:
         raise PaymentError(
             "STRIPE_SECRET_KEY is not set. Copy .env.example to .env and add your test key."
         )
     stripe.api_key = secret_key
 
 
-def create_connection_token() -> str: # creates temporary token to connect card reader to SDK
+def create_connection_token() -> str:  # gives the SDK a token so it can connect to the reader
     _client()
     try:
         token = stripe.terminal.ConnectionToken.create()
@@ -32,7 +32,7 @@ def create_connection_token() -> str: # creates temporary token to connect card 
     return token.secret
 
 
-def create_payment_intent(amount_cents: int, receipt_email: str | None = None) -> dict[str, object]:     # Opens a charge for the given amount (in cents).
+def create_payment_intent(amount_cents: int, receipt_email: str | None = None) -> dict[str, object]:  # opens a charge, no money moved yet
     if not isinstance(amount_cents, int) or amount_cents < MINIMUM_CHARGE_CENTS:
         raise PaymentError(
             f"amount must be a whole number of cents, at least {MINIMUM_CHARGE_CENTS}"
@@ -40,15 +40,15 @@ def create_payment_intent(amount_cents: int, receipt_email: str | None = None) -
 
     _client()
     try:
-        params = {                                    # sets parameters for stripe
+        params = {  # what we're telling stripe to set up
             "amount": amount_cents,
             "currency": "usd",
             "payment_method_types": ["card_present"],
             "capture_method": "manual",
         }
         if receipt_email:
-            params["receipt_email"] = receipt_email    # if receipt_email is passed from reg form stripe will automatically
-        intent = stripe.PaymentIntent.create(**params) # emails a separate receipt when payment is processed
+            params["receipt_email"] = receipt_email  # stripe auto-emails a receipt if we give it one
+        intent = stripe.PaymentIntent.create(**params)
     except stripe.error.StripeError as exc:
         raise PaymentError(str(exc)) from exc
 
@@ -59,7 +59,7 @@ def create_payment_intent(amount_cents: int, receipt_email: str | None = None) -
     }
 
 
-def capture_payment_intent(payment_intent_id: str) -> dict[str, object]: # takes the money after the reader confirms the card was read successfully
+def capture_payment_intent(payment_intent_id: str) -> dict[str, object]:  # takes the money once the card's confirmed good
     _client()
     try:
         intent = stripe.PaymentIntent.capture(payment_intent_id)
