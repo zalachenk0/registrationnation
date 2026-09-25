@@ -1,12 +1,11 @@
 // payment.ts, browser side
 //
-// takes the card payment on the stripe terminal
-// calls chargeCard(amountCents) and checks the result. 
-// also has a second argument to also have stripe email an official receipt:
-//   chargeCard(7100, customerEmail)
+// takes payment by talking to our stripe server backend (scanner_api.py)
+// calls chargeCard(amountCents) and checks the result
+// also pulls email from form have stripe email a official receipt chargeCard(7100, customerEmail)
 //
-// This talks to our own Flask backend (scanner_api.py) at /api/payment/*,
-// never to Stripe directly - the secret key lives only on the server.
+// the browser side and server side are kept separate so that the secret key only lives in the server and not in the browser where it can be stolen from 
+// 
 
 import { loadStripeTerminal } from "@stripe/terminal-js";
 
@@ -14,9 +13,6 @@ type ChargeResult =
   | { success: true; paymentIntentId: string }
   | { success: false; error: string };
 
-// The object @stripe/terminal-js's loadStripeTerminal() resolves to,
-// with null (its "not in a browser" case) removed - we only ever call
-// this from the browser.
 type StripeTerminalSDK = NonNullable<Awaited<ReturnType<typeof loadStripeTerminal>>>;
 type Terminal = ReturnType<StripeTerminalSDK["create"]>;
 
@@ -32,11 +28,8 @@ async function fetchConnectionToken(): Promise<string> {
   return data.secret;
 }
 
-// Connects to the card reader. chargeCard() calls this automatically
-// the first time it's needed, and the same connection is reused after
-// that - you don't normally need to call this yourself, though it's
-// exported so the UI can show "connecting..." before the customer taps
-// the pay button.
+// connects to the card reader. chargeCard() automatically calls this
+// the first time it's needed and the same connection is used after that
 export async function connectToReader(): Promise<void> {
   if (terminal) {
     return;
@@ -54,11 +47,9 @@ export async function connectToReader(): Promise<void> {
     },
   });
 
-  // { simulated: true } uses Stripe's practice reader, which is why
-  // this works with no physical hardware plugged in.
+  // { simulated: true } is used to use stripe's simulated reader,
   //
-  // >>> WHEN THE PHYSICAL S700 ARRIVES, CHANGE ONLY THIS ONE LINE <<<
-  // Replace it with:
+  // when the real terminal arrives, we'll replace it with:
   //   const discoverResult = await terminal.discoverReaders({ location: "<your Stripe location id>" });
   const discoverResult = await terminal.discoverReaders({ simulated: true });
 
@@ -74,11 +65,9 @@ export async function connectToReader(): Promise<void> {
   readerIsConnected = true;
 }
 
-// The main function the app calls. Give it a dollar amount in CENTS
-// (7100 for $71.00, not 71). Walks through the reader flow and returns
-// whether it worked. receiptEmail is optional - if given, Stripe
-// automatically emails an official payment receipt once the charge
-// succeeds (separate from the printed sticker/receipt mockup).
+// this is the main function the app calls
+// we give it a dollar amount in cents like 7100 for $71.00, not 71. 
+// Walks through the reader flow and returns whether it worked.
 export async function chargeCard(
   amountCents: number,
   receiptEmail?: string
