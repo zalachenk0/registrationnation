@@ -76,12 +76,18 @@ def main() -> None:
 
     try:
         form: dict = {}                            # one customer visit
-        personal_information_screen(scanner, form)
-        driver_license_details_screen(form)
-        insurance_and_vehicle_screen(scanner, form)
-        print("\n== Review ==")
-        for key, value in form.items():
-            print(f"  {key}: {value}")
+        try:
+            personal_information_screen(scanner, form)
+            driver_license_details_screen(form)
+            insurance_and_vehicle_screen(scanner, form)
+            print("\n== Review ==")
+            for key, value in form.items():
+                print(f"  {key}: {value}")
+            # ... payment, print request: the transaction is completed
+        finally:
+            # Completed OR cancelled (Ctrl+C here; the kiosk's Cancel button):
+            # erase this customer's scans before the next customer
+            scanner.end_transaction()
     finally:
         scanner.close()                            # when the kiosk app exits
 

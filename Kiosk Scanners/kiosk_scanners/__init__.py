@@ -10,6 +10,8 @@ Typical use (keeps the camera open between scans):
         license = scanner.scan_drivers_license()    # ScanResult, or None if cancelled
         if license:
             print(license.fields["customer_last_name"], license.missing)
+        ...
+        scanner.end_transaction()    # customer done or cancelled: erase their scans
 
 One-off helpers open and close the camera for a single scan:
 
@@ -21,7 +23,7 @@ See README.md for the fields each scan returns.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from .config import ScannerConfig
 from .results import (DRIVERS_LICENSE, INSURANCE_CARD, REGISTRATION_RENEWAL, ScannerError,
@@ -36,17 +38,25 @@ __all__ = [
 __version__ = "1.0.0"
 
 
-def scan_drivers_license(**config: Any) -> Optional[ScanResult]:
-    """Single scan with its own camera session. Keyword args override ScannerConfig fields."""
+def _single_scan(document: str, config: Dict[str, Any]) -> Optional[ScanResult]:
     with KioskScanner(**config) as scanner:
-        return scanner.scan_drivers_license()
+        result = scanner.scan(document)
+        scanner._hand_off()          # closing must not erase the result being returned
+        return result
+
+
+def scan_drivers_license(**config: Any) -> Optional[ScanResult]:
+    """
+    Single scan with its own camera session. Keyword args override
+    ScannerConfig fields. Call result.erase() when the transaction is
+    completed or cancelled.
+    """
+    return _single_scan(DRIVERS_LICENSE, config)
 
 
 def scan_insurance_card(**config: Any) -> Optional[ScanResult]:
-    with KioskScanner(**config) as scanner:
-        return scanner.scan_insurance_card()
+    return _single_scan(INSURANCE_CARD, config)
 
 
 def scan_registration_renewal(**config: Any) -> Optional[ScanResult]:
-    with KioskScanner(**config) as scanner:
-        return scanner.scan_registration_renewal()
+    return _single_scan(REGISTRATION_RENEWAL, config)

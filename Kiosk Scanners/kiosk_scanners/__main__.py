@@ -69,22 +69,33 @@ def main(argv=None) -> int:
     def emit(payload: dict) -> None:
         print(json.dumps(payload, indent=2))
 
+    document = DOCUMENTS[args.document]
+    # Checked here, not with ap.error(): its exit code 2 means "cancelled"
+    if args.command == "read":
+        needed = 2 if document == "drivers_license" else 1
+        if len(args.images) != needed:
+            emit({"error": "read license needs FRONT and BACK images" if needed == 2
+                  else f"read {args.document} needs one image"})
+            return 1
+
     try:
         with KioskScanner(config) as scanner:
-            document = DOCUMENTS[args.document]
             if args.command == "scan":
                 result = scanner.scan(document)
             elif document == "drivers_license":
-                if len(args.images) != 2:
-                    ap.error("read license needs FRONT and BACK images")
                 result = scanner.read_drivers_license(*args.images)
             else:
-                if len(args.images) != 1:
-                    ap.error(f"read {args.document} needs one image")
                 result = (scanner.read_insurance_card if document == "insurance_card"
                           else scanner.read_registration_renewal)(args.images[0])
+            # The calling program owns the result (and any --output files):
+            # it deletes them when its transaction is completed or cancelled
+            scanner._hand_off()
     except ScannerError as e:
         emit({"error": str(e)})
+        return 1
+    except Exception as e:           # still answer in JSON, so the caller can parse it
+        logging.getLogger(__name__).exception("Scan failed")
+        emit({"error": f"{type(e).__name__}: {e}"})
         return 1
     if result is None:
         emit({"cancelled": True})

@@ -5,10 +5,10 @@ from __future__ import annotations
 import dataclasses
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import documents, drivers_license, insurance, registration, ui
-from .camera import Camera
+from .camera import Camera, CameraError
 from .config import ScannerConfig
 from .results import ImageSource, ScanResult, configure_tesseract
 
@@ -33,6 +33,10 @@ class KioskScanner:
     camera stays open between scans (opening it costs ~1 s plus focus
     settling), and each OCR engine is created on first use and reused.
 
+    Call end_transaction() when each customer's transaction is completed or
+    cancelled: it erases that customer's scans (saved files, images and
+    fields). close() does the same for a transaction still open.
+
     Settings: pass a ScannerConfig and/or keyword overrides of its fields,
     e.g. KioskScanner(camera_index=0, fullscreen=True, output_dir="scans").
     """
@@ -46,6 +50,7 @@ class KioskScanner:
         self.window = ui.Window(self.config.window_title, self.config.window_size,
                                 self.config.fullscreen)
         self._camera: Optional[Camera] = None
+        self._transaction: List[ScanResult] = []    # results to erase at end_transaction()
         self._ocr: Dict[str, Any] = {}
         self._tesseract_ready = False
 
@@ -98,10 +103,20 @@ class KioskScanner:
         if self._camera is not None:
             self._camera.refocus()
 
+    def end_transaction(self) -> None:
+        """
+        Erases everything scanned since the last call: saved files, images
+        and field values. Call it when the customer's transaction is
+        completed or cancelled, once the form no longer needs the results.
+        """
+        for result in self._transaction:
+            result.erase()
+        self._transaction.clear()
+
     def close(self) -> None:
-        if self._camera is not None:
-            self._camera.release()
-            self._camera = None
+        """Releases the camera. A transaction still open is treated as cancelled and erased."""
+        self.end_transaction()
+        self._release_camera()
         self.window.close()
 
     def __enter__(self) -> "KioskScanner":
@@ -118,25 +133,42 @@ class KioskScanner:
                          lambda camera: documents.capture(profile, ocr, camera, self.window, self.config))
 
     def _run(self, title: str, flow: Callable[[Camera], Optional[ScanResult]]) -> Optional[ScanResult]:
-        if self._camera is None:
-            # Opening the camera blocks ~1 s — show the window first
-            self.window.show(ui.starting_screen(self.config.preview_res, title))
-            camera = self._open_camera()
-        else:
-            # The camera sat idle while the customer filled in the form
-            camera = self._camera
-            camera.flush()
         try:
+            if self._camera is None:
+                # Opening the camera blocks ~1 s — show the window first
+                self.window.show(ui.starting_screen(self.config.preview_res, title))
+                camera = self._open_camera()
+            else:
+                # The camera sat idle while the customer filled in the form
+                camera = self._camera
+                camera.flush()
             result = flow(camera)
+        except CameraError:
+            # Unplugged or lost: drop it so the next scan opens it again
+            self._release_camera()
+            raise
         finally:
+            # Also on errors: a window nobody is drawing into would sit
+            # frozen ("Not Responding") over the kiosk form
             if not self.config.keep_window_open:
                 self.window.close()
         return self._saved(result) if result is not None else None
 
     def _saved(self, result: ScanResult) -> ScanResult:
+        # Tracked until end_transaction() erases it
+        self._transaction.append(result)
         if self.config.output_dir is not None:
             result.save(self.config.output_dir)
         return result
+
+    def _hand_off(self) -> None:
+        """The caller now owns this transaction's results (one-off helpers, command line)."""
+        self._transaction.clear()
+
+    def _release_camera(self) -> None:
+        if self._camera is not None:
+            self._camera.release()
+            self._camera = None
 
     def _open_camera(self) -> Camera:
         if self._camera is None:
@@ -145,7 +177,9 @@ class KioskScanner:
 
     def _get_ocr(self, profile: documents.DocumentProfile) -> Any:
         if not self._tesseract_ready:
-            configure_tesseract(self.config.tesseract_cmd)
+            # The OCR engines set pytesseract's path from config.tesseract_cmd,
+            # so it must be the path actually found (it may be the PATH fallback)
+            self.config.tesseract_cmd = configure_tesseract(self.config.tesseract_cmd)
             self._tesseract_ready = True
         if profile.document not in self._ocr:
             self._ocr[profile.document] = profile.make_ocr(self.config)

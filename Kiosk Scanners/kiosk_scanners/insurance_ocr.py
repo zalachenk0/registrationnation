@@ -437,13 +437,19 @@ class InsuranceFieldExtractor:
     # ------------------------------------------------------------------
 
     def _find_year(self, lines: List[str], vin_line_idx: int) -> Tuple[str, float]:
-        # First: look on the VIN line and ±2 lines (most common placement)
-        search_start = max(0, vin_line_idx - 2)
-        search_end = min(len(lines), vin_line_idx + 3)
-        for line in lines[search_start:search_end]:
-            match = self._YEAR_RE.search(line)
-            if match:
-                return match.group(1), 0.92
+        # First: the VIN line, then the lines nearest it, up to ±2 (most
+        # common placement). Dates are cut out first: on table layouts the
+        # policy dates sit just above the vehicle row, and "09/11/2025" was
+        # read as the year. Only when a VIN was found (-1 means none).
+        if vin_line_idx >= 0:
+            for offset in (0, -1, 1, -2, 2):
+                idx = vin_line_idx + offset
+                if not 0 <= idx < len(lines):
+                    continue
+                line = self._TEXT_DATE_RE.sub(" ", self._DATE_RE.sub(" ", lines[idx]))
+                match = self._YEAR_RE.search(line)
+                if match:
+                    return match.group(1), 0.92
 
         # Fallback: global search — some cards put year on a separate header line
         for line in lines:

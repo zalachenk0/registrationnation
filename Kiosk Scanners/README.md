@@ -46,12 +46,14 @@ with KioskScanner() as scanner:                 # one session for the life of th
     else:
         form.update(result.fields)              # dict of str
         ask_customer_to_fill(result.missing)    # keys that weren't found
+    ...
+    scanner.end_transaction()                   # customer finished or cancelled: erase their scans
 ```
 
 - Call `scan_drivers_license()`, `scan_insurance_card()` and `scan_registration_renewal()` whenever your form needs them, in any order, as many times as needed.
 - The camera stays open for the whole session, so later scans start instantly. Call `scanner.preload()` to open the camera and the OCR engines before the first scan.
-- If you only need one scan, there are shortcut functions that open and close the camera themselves: `from kiosk_scanners import scan_insurance_card`, then `scan_insurance_card()`.
-- Problems that stop a scan raise `ScannerError`. Examples: the camera is unplugged, Tesseract is missing, or an image can't be read.
+- If you only need one scan, there are shortcut functions that open and close the camera themselves: `from kiosk_scanners import scan_insurance_card`, then `scan_insurance_card()`. You own that result: call `result.erase()` when the transaction ends.
+- Problems that stop a scan raise `ScannerError`. Examples: the camera is unplugged, Tesseract is missing, or an image can't be read. If the camera stops sending images for 15 seconds, the scan raises `ScannerError` and the next scan reopens the camera.
 - The scan call blocks while it runs. In a GUI app, run it from the UI thread with your own window hidden, or from a worker thread. Don't run two scans at once.
 
 ### Fitting scans into the kiosk form
@@ -66,6 +68,7 @@ Scans are **not** done all at once. Each one runs at its own step of the form, a
 | **Insurance and vehicle** | `scan_insurance_card()`, then `scan_registration_renewal()` **only if they have the notice** | completes the rest |
 | Review → Payment → Print request | — | — |
 
+- **Call `scanner.end_transaction()` when the customer's transaction is completed or cancelled.** It erases everything scanned since the last call: the saved files and the images and field values held in memory. Copy what you need into your form first. `close()` treats a transaction that's still open as cancelled and erases it too.
 - **Create one `KioskScanner` when the kiosk app starts, and keep it for every customer.** Call `preload()` once, then `close()` when the app exits. The camera stays open while the customer fills in the form, so a scan minutes later still starts instantly. Before each scan, the frames buffered while the camera sat idle are thrown away, so the preview never shows an old image (such as the previous customer's document).
 - **Each scan call opens the scan window and closes it when done**, so your form comes back to the front.
 - **Use the scan results to prefill, then let the customer edit.** Write `result.fields` into the form's inputs, but leave every input editable. Highlight `result.missing`, the fields the scan couldn't read.
@@ -83,8 +86,9 @@ Scans are **not** done all at once. Each one runs at its own step of the form, a
 | `missing` | List of the keys that came back empty |
 | `images` | Cropped, upright images as BGR numpy arrays: `front`/`back`, `card` or `notice` |
 | `notes` | Messages for staff, such as `"Orientation uncertain — check the image is upright"` |
-| `save(folder)` | Writes the images and `<prefix>_form_data.json`. Returns the paths |
-| `delete_files()` | Deletes the saved files. Call it once the form is submitted, because the files contain personal data |
+| `save(folder)` | Writes the images and the form JSON, named `<prefix>_<scan id>_<name>`, so every scan's files are separate. Returns the paths |
+| `delete_files()` | Deletes the saved files |
+| `erase()` | Deletes the saved files and clears `images`, `fields` and `notes`. `end_transaction()` calls this for every scan in the transaction |
 | `to_dict()` | JSON-ready summary, without the images |
 
 ### Offline (image files instead of the camera)
@@ -136,6 +140,8 @@ The JSON result is printed to stdout. Logs go to stderr; add `-v` for more detai
 | 2 | Customer cancelled | `{"cancelled": true}` |
 
 Each call opens the camera again, which adds about 1 second. For back-to-back scans, the Python API is faster.
+
+With `--output`, the files listed under `"files"` stay on disk after the command exits. The calling program must delete them when the customer's transaction is completed or cancelled.
 
 ---
 
