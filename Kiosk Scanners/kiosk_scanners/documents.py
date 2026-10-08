@@ -25,7 +25,7 @@ import pytesseract
 from . import ui
 from .camera import Camera
 from .config import ScannerConfig
-from .results import ImageSource, ScanResult, load_image
+from .results import ImageSource, ScannerError, ScanResult, load_image
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ CROP_MARGIN = 0.02                # border kept around the detected page
 OSD_MAX_SIDE = 2000               # OSD input size: small text needs resolution
 OSD_CONF_MIN = 1.0                # below this, OSD's answer is treated as a guess
 OSD_FRESH_S = 3.0                 # a preview OSD result this recent is reused at capture
+# ...but only if the page still looks like the frame OSD ran on (mean
+# difference of 32x24 grayscale thumbnails, 0-255). Camera noise is a few
+# levels; a page turned or moved changes it far more.
+OSD_SAME_PAGE_MAX = 12.0
 
 
 @dataclass(frozen=True)
@@ -172,6 +176,8 @@ def detect_rotation(document: np.ndarray) -> Tuple[Optional[int], float]:
             return int(osd["rotate"]), float(osd["orientation_conf"])
         except pytesseract.TesseractError:
             continue         # "Too few characters" — blank or unreadable
+        except pytesseract.TesseractNotFoundError as e:   # not a TesseractError subclass
+            raise ScannerError(f"Tesseract OCR could not be run: {e}") from e
     return None, 0.0
 
 
@@ -180,27 +186,50 @@ def rotate_upright(document: np.ndarray, rotate: Optional[int]) -> np.ndarray:
     return cv2.rotate(document, code) if code is not None else document
 
 
+def page_signature(preview: np.ndarray) -> np.ndarray:
+    """Tiny grayscale thumbnail of the guide area, to tell whether the page moved."""
+    h, w = preview.shape[:2]
+    gx, gy, gw, gh = guide_rect(w, h)
+    gray = cv2.cvtColor(preview[gy:gy + gh, gx:gx + gw], cv2.COLOR_BGR2GRAY)
+    return cv2.resize(gray, (32, 24), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+
 class OrientationWorker:
     """Runs OSD in the background on the newest crop so the preview stays smooth (~1-2 s per call)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pending: Optional[np.ndarray] = None
+        self._pending: Optional[Tuple[np.ndarray, np.ndarray]] = None
         self._wake = threading.Event()
         self._stop = False
         self._running = False
         self.result: Tuple[Optional[int], float] = (None, 0.0)
         self.updated_at = 0.0
+        self._signature: Optional[np.ndarray] = None   # page_signature of the frame behind `result`
         threading.Thread(target=self._run, daemon=True).start()
 
-    def submit(self, document: np.ndarray) -> None:
+    def submit(self, document: np.ndarray, signature: np.ndarray) -> None:
         with self._lock:
-            self._pending = document
+            self._pending = (document, signature)
         self._wake.set()
 
     def reset(self) -> None:
         with self._lock:
-            self.result, self.updated_at = (None, 0.0), 0.0
+            self.result, self.updated_at, self._signature = (None, 0.0), 0.0, None
+
+    def result_for(self, signature: np.ndarray) -> Optional[Tuple[Optional[int], float]]:
+        """
+        The latest result if it's recent AND came from a frame that looks like
+        `signature`, else None. OSD finishes 1-2 s after its frame was taken:
+        a customer told "Upside down" who turns the page and captures at once
+        must not get the old 180-degree answer applied to the upright page.
+        """
+        with self._lock:
+            if self._signature is None or time.time() - self.updated_at >= OSD_FRESH_S:
+                return None
+            if float(np.mean(np.abs(self._signature - signature))) > OSD_SAME_PAGE_MAX:
+                return None
+            return self.result
 
     def busy(self) -> bool:
         return self._wake.is_set() or self._running
@@ -213,14 +242,19 @@ class OrientationWorker:
         while not self._stop:
             self._wake.wait()
             with self._lock:
-                document, self._pending = self._pending, None
-                self._running = document is not None
+                pending, self._pending = self._pending, None
+                self._running = pending is not None
             self._wake.clear()
-            if document is None or self._stop:
+            if pending is None or self._stop:
                 continue
-            result = detect_rotation(document)
+            document, signature = pending
+            try:
+                result = detect_rotation(document)
+            except Exception as e:      # keep the thread alive; capture re-checks and reports
+                LOGGER.warning(f"Orientation check failed: {e}")
+                result, signature = (None, 0.0), None
             with self._lock:
-                self.result, self.updated_at = result, time.time()
+                self.result, self.updated_at, self._signature = result, time.time(), signature
                 self._running = False
 
 
@@ -338,7 +372,7 @@ def _preview(profile: DocumentProfile, config: ScannerConfig, preview: np.ndarra
 
     # Feed the latest full-res crop to the OSD thread whenever it's idle
     if not worker.busy():
-        worker.submit(crop_document(frame, full_corners))
+        worker.submit(crop_document(frame, full_corners), page_signature(preview))
     orient_msg, orient_kind = _orientation_status(profile, *worker.result)
 
     s, (ox, oy, k) = ui.place_video(config.preview_res, video)
@@ -411,12 +445,12 @@ def capture(profile: DocumentProfile, ocr: Any, camera: Camera, window: ui.Windo
                 toast, toast_until = "Image is blurry — hold the page still", time.time() + 3
                 continue
 
-            # Reuse the preview's orientation if fresh and confident, else check the capture
-            fresh = time.time() - worker.updated_at < OSD_FRESH_S
+            # Reuse the preview's orientation if it's fresh and from this same
+            # page position, else check the capture itself
             document, form, note = ui.run_busy(
                 window, screen, f"Reading {profile.noun}…", "This usually takes a few seconds",
                 orient_and_read, profile, ocr, crop_document(frame, corners),
-                worker.result if fresh else None)
+                worker.result_for(page_signature(preview)))
             if corners is None:
                 note = (note + "  ·  " if note else "") + "Page edges not found — cropped to the paper"
             review = ui.review_screen(config.preview_res, "Confirm your details",

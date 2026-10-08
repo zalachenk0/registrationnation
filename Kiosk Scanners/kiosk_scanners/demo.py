@@ -133,9 +133,8 @@ def run(config: Optional[ScannerConfig] = None) -> None:
             if key in (ord("f"), ord("F")):
                 scanner.refocus()
             elif key in (ord("c"), ord("C")):
-                for result in results.values():
-                    if result is not None:
-                        result.delete_files()
+                # Like a finished customer: erase the scans (exiting does it too)
+                scanner.end_transaction()
                 results, last, message = {}, None, ""
             elif key in by_key:
                 document = by_key[key]
