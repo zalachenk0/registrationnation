@@ -1,0 +1,7 @@
+opencv-python>=4.8
+numpy>=1.24
+pillow>=10.1
+pytesseract>=0.3.10
+zxing-cpp>=2.2
+# Also required (not pip): Tesseract OCR 5.x
+#   https://github.com/UB-Mannheim/tesseract/wiki  (default path C:\Program Files\Tesseract-OCR)
