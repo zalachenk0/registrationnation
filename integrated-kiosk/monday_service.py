@@ -12,7 +12,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests  # monday api
@@ -28,28 +28,55 @@ class MondayError(RuntimeError):  # monday said no, or we're not set up right
 
 
 # ---------------------------------------------------------------------------
-# EDIT THIS: which info from the form goes into which monday column
+# which info from the form goes into which column on the board
+# board: "UTSA TTT Online Registration Renewal Duplicate"
 #
 #   "formField": {"column": "<monday column id>", "type": "<monday column type>"},
+#   "anyName":   {"column": "<id>", "type": "status", "value": "Label"},   <- "value" means always send exactly that
 #
 # - column ids are NOT the column titles. run  py monday_service.py columns  to see them
 # - only the fields listed here are ever sent to monday, everything else stays on the kiosk
-# - types we can fill: text, long_text, numbers, status, dropdown, date, email, phone, link, checkbox
+# - types we can fill: text, long_text, numbers, status, dropdown, date, datetime, email, phone, link, checkbox
 # - the form fields you can use are listed in SAMPLE_FIELDS at the bottom of this file
-#
-# example (made up ids):
-#   "email":        {"column": "email_mkx12ab",    "type": "email"},
-#   "phone":        {"column": "phone_mkx34cd",    "type": "phone"},
-#   "licensePlate": {"column": "text_mkx56ef",     "type": "text"},
-#   "amountPaid":   {"column": "numbers_mkx78gh",  "type": "numbers"},
-#   "status":       {"column": "status_mkx90ij",   "type": "status"},
-#   "paidDate":     {"column": "date_mkx11kl",     "type": "date"},
+# - status values have to match one of the board's labels exactly
 # ---------------------------------------------------------------------------
 COLUMN_MAP: dict[str, dict[str, str]] = {
+    # customer (the first First/Last Name pair on the board, the one next to the address, phone and email)
+    "firstName":           {"column": "text09__1",      "type": "text"},       # First Name
+    "lastName":            {"column": "text1__1",       "type": "text"},       # Last Name
+    "address":             {"column": "text016__1",     "type": "text"},       # Street Address
+    "city":                {"column": "text4__1",       "type": "text"},       # City
+    "state":               {"column": "text3__1",       "type": "text"},       # State / Province
+    "zip":                 {"column": "text33__1",      "type": "text"},       # Postal / Zip Code
+    "phone":               {"column": "phone__1",       "type": "phone"},      # Phone Number
+    "email":               {"column": "email__1",       "type": "email"},      # Email
+
+    # vehicle
+    "licensePlate":        {"column": "text60__1",      "type": "text"},       # License Plate
+    "vinLast6":            {"column": "text9__1",       "type": "text"},       # Vehicle VIN (Last 6), worked out from the full vin below
+    "vehicleYear":         {"column": "text39__1",      "type": "text"},       # Vehicle Year
+    "vehicleMake":         {"column": "text96__1",      "type": "text"},       # Vehicle Make
+    "vehicleModel":        {"column": "text2__1",       "type": "text"},       # Vehicle Model
+    "insuranceProvider":   {"column": "text_mm88wyt8",  "type": "text"},       # Insurance Provider (column added for the kiosk)
+    "policyNumber":        {"column": "text_mm88cmrd",  "type": "text"},       # Policy Number (column added for the kiosk)
+    "insuranceExpiration": {"column": "date4__1",       "type": "date"},       # Vehicle Insurance Expiration
+
+    # the payment
+    "submittedAt":         {"column": "date__1",        "type": "datetime"},   # Submission Date (this column shows the time too)
+    "amountPaid":          {"column": "numbers5__1",    "type": "numbers"},     # Total Cost
+    "confirmationNumber":  {"column": "text32__1",      "type": "text"},       # Invoice Number
+    "paymentIntentId":     {"column": "text_mm88bzfy",  "type": "text"},       # Stripe Payment ID (column added for the kiosk)
+    "adminNote":           {"column": "long_text0__1",  "type": "long_text"},  # Admin Notes (has the stripe payment id for reconciling)
+
+    # same every time
+    "source":              {"column": "text20__1",      "type": "text",   "value": "Kiosk"},                  # Source
+    "transactionStatus":   {"column": "status9__1",     "type": "status", "value": "Received"},               # Transaction Status
+    "renewalType":         {"column": "status59__1",    "type": "status", "value": "Registration Renewal"},   # Registration Renewal Store*
+    "renewalStatus":       {"column": "status0__1",     "type": "status", "value": "Completed at kiosk"},      # Renewal Status (this label has to be added to the board first, spelled exactly like this)
 }
 
 # column types we know how to fill (used by the 'columns' helper)
-SUPPORTED_TYPES = {"text", "long_text", "numbers", "status", "dropdown", "date", "email", "phone", "link", "checkbox"}
+SUPPORTED_TYPES = {"text", "long_text", "numbers", "status", "dropdown", "date", "datetime", "email", "phone", "link", "checkbox"}
 
 
 # monday api
@@ -79,6 +106,15 @@ def _format_value(column_type: str, raw: Any) -> tuple[Any, str | None]:
         iso = _to_iso_date(text)
         if iso is None:
             return None, f"couldn't read '{text}' as a date"
+        return {"date": iso}, None
+
+    if column_type == "datetime":  # a date column that also shows the time
+        parsed = _to_utc_datetime(text)
+        if parsed is not None:
+            return {"date": parsed.date().isoformat(), "time": parsed.strftime("%H:%M:%S")}, None
+        iso = _to_iso_date(text)  # no time in there, so just send the date
+        if iso is None:
+            return None, f"couldn't read '{text}' as a date and time"
         return {"date": iso}, None
 
     if column_type == "email":
@@ -111,6 +147,43 @@ def _to_iso_date(text: str) -> str | None:
         except ValueError:
             continue
     return None
+
+
+# monday api
+# date columns that show the time want the time in UTC, so we convert whatever we're given
+def _to_utc_datetime(text: str) -> datetime | None:
+    if "T" not in text and ":" not in text:
+        return None  # just a date, no time to convert
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)  # no timezone given, assume utc
+    return parsed.astimezone(timezone.utc)
+
+
+# our design
+# a few things the board wants that the form doesn't hand us directly, so we work them out here
+def _add_derived_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    result = dict(fields)  # copy so we never change what the caller sent
+
+    vin = re.sub(r"\s", "", str(result.get("vin") or ""))
+    if not result.get("vinLast6") and len(vin) >= 6:
+        result["vinLast6"] = vin[-6:].upper()  # the board only has a 'last 6' column, so the full vin never leaves the kiosk
+
+    if not result.get("submittedAt"):
+        result["submittedAt"] = datetime.now(timezone.utc).isoformat()  # the moment the record is made
+
+    if not result.get("adminNote"):
+        note = "Kiosk renewal, paid by card through Stripe."
+        if result.get("paymentIntentId"):
+            note += f" Payment ID: {result['paymentIntentId']}."
+        if result.get("confirmationNumber"):
+            note += f" Confirmation: {result['confirmationNumber']}."
+        result["adminNote"] = note
+
+    return result
 
 
 def _config() -> tuple[str, str, str | None]:
@@ -180,10 +253,11 @@ def create_monday_record(item_name: str | None, fields: dict[str, Any]) -> dict[
     # our design
     # only the fields in COLUMN_MAP get sent, and anything that can't be formatted
     # is skipped with a warning instead of making the whole record fail
+    fields = _add_derived_fields(fields)
     column_values: dict[str, Any] = {}
     warnings: list[str] = []
     for field_name, spec in COLUMN_MAP.items():
-        raw = fields.get(field_name)
+        raw = spec["value"] if "value" in spec else fields.get(field_name)  # "value" = same every time
         if raw is None or str(raw).strip() == "":
             continue  # nothing to send for this one
         formatted, warning = _format_value(spec["type"], raw)
@@ -224,6 +298,7 @@ def create_monday_record(item_name: str | None, fields: dict[str, Any]) -> dict[
 # ---------------------------------------------------------------------------
 
 # every field the form sends us, with a sample value. 'test' sends all of these
+# (vinLast6, submittedAt and adminNote aren't here because they're worked out automatically)
 SAMPLE_FIELDS: dict[str, str] = {
     "fullName": "Sample Customer",
     "firstName": "Sample",
