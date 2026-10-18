@@ -5,4 +5,5 @@ pytesseract>=0.3.13,<1
 zxing-cpp>=2.3,<3
 gunicorn>=23,<24
 stripe>=11,<12
+requests>=2.32,<3
 python-dotenv>=1.0,<2

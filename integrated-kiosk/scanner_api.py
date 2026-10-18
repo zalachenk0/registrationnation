@@ -16,6 +16,7 @@ from insurance_card_ocr_rev3 import InsuranceCardOCR, InsuranceCardOCRConfig
 from camera_capture import CameraError, KioskCamera
 from printer_service import PrinterError, print_registration_mockup, printer_status
 from payment_service import PaymentError, create_connection_token, create_payment_intent, capture_payment_intent
+from monday_service import MondayError, create_monday_record
 
 load_dotenv()
 
@@ -202,6 +203,22 @@ def payment_capture_intent():
         return jsonify(error=str(exc)), 500
         
 # payment portion end 
+
+
+# monday.com crm portion
+# the form calls this after a renewal is paid and printed. the real work is in monday_service.py
+
+@app.post("/api/monday/create_record")
+def monday_create_record():
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = create_monday_record(payload.get("itemName"), payload.get("fields") or {})
+        return jsonify(success=True, **result)
+    except MondayError as exc:
+        return jsonify(error=str(exc)), exc.status
+
+# monday.com crm portion end
+
 
 @app.get("/")
 def serve_ui():
