@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { chargeCard, connectToReader } from "./payment";
+import { createMondayRecord } from "./monday";
 
 type Step = 1 | 2 | 3 | 4 | 5;
 
@@ -1079,6 +1080,12 @@ export default function App() {
   const [printError, setPrintError] = useState("");
   const [confirmationNumber, setConfirmationNumber] = useState("");
 
+  // monday.com crm record, shown on the success screen
+  const [crmStatus, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [crmMessage, setCrmMessage] = useState("");
+  const crmSavedRef = useRef(false);  // so a print retry can never make a second crm record
+  const crmPayloadRef = useRef<{ itemName: string; fields: Record<string, string | number> } | null>(null);  // kept so the retry button can resend it
+
   const [personal, setPersonal] = useState<PersonalInfo>({
     firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "",
     address: "", city: "", state: "", zip: "",
@@ -1130,12 +1137,70 @@ export default function App() {
     5: "Tap, insert, or swipe your card to complete the $71.00 renewal payment.",
   };
 
+  // builds what we send to monday.com. the server only forwards the fields listed in COLUMN_MAP (monday_service.py)
+  const buildCrmPayload = (confirmation: string, paymentIntentId: string) => {
+    const fullName = `${personal.firstName} ${personal.lastName}`.trim();
+    const plate = license.licensePlate.trim();
+    const cityStateZip = [personal.city, `${personal.state} ${personal.zip}`.trim()].filter(Boolean).join(", ");
+    return {
+      itemName: fullName ? `${personal.lastName}, ${personal.firstName}${plate ? ` - ${plate}` : ""}` : `Renewal ${confirmation}`,
+      fields: {
+        fullName,
+        firstName: personal.firstName,
+        lastName: personal.lastName,
+        email: personal.email,
+        phone: personal.phone,
+        dateOfBirth: personal.dateOfBirth,
+        address: personal.address,
+        city: personal.city,
+        state: personal.state,
+        zip: personal.zip,
+        fullAddress: [personal.address, cityStateZip].filter(Boolean).join(", "),
+        licenseNumber: license.licenseNumber,
+        licensePlate: plate,
+        vin: license.vin,
+        vehicleYear: license.vehicleYear,
+        vehicleMake: license.vehicleMake,
+        vehicleModel: license.vehicleModel,
+        vehicle: `${license.vehicleYear} ${license.vehicleMake} ${license.vehicleModel}`.trim(),
+        insuranceProvider: insurance.provider,
+        policyNumber: insurance.policyNumber,
+        insuranceExpiration: insurance.endDate,
+        service: "Vehicle Registration Renewal",
+        amountPaid: (RENEWAL_FEE_CENTS / 100).toFixed(2),
+        confirmationNumber: confirmation,
+        paymentIntentId,
+        paidDate: new Date().toISOString().slice(0, 10),
+        status: "Paid",
+      } as Record<string, string | number>,
+    };
+  };
+
+  // sends the record to monday.com and updates the status shown on the success screen
+  const saveToCrm = async (payload: { itemName: string; fields: Record<string, string | number> }) => {
+    crmPayloadRef.current = payload;
+    setCrmStatus("saving");
+    setCrmMessage("");
+    const result = await createMondayRecord(payload.itemName, payload.fields);
+    if (result.success) {
+      crmSavedRef.current = true;
+      setCrmStatus("saved");
+      setCrmMessage(result.warnings.length ? `Saved, but skipped: ${result.warnings.join("; ")}` : "");
+    } else {
+      setCrmStatus("failed");
+      setCrmMessage(result.error);
+    }
+  };
+
   const handlePaymentAndPrint = async () => { // if payment was already received, reuses charge without charging again to print receipt
     setPrintError("");
     
     let paymentIntentId = pendingPaymentIntentId;
 
     if (!paymentIntentId) {
+      crmSavedRef.current = false;  // brand new transaction, so forget the last customer's crm status
+      setCrmStatus("idle");
+      setCrmMessage("");
       setPaymentStage("charging");
       const chargeResult = await chargeCard(RENEWAL_FEE_CENTS, personal.email || undefined);
       if (!chargeResult.success) {
@@ -1163,6 +1228,11 @@ export default function App() {
       setConfirmationNumber(confirmation);
       setSubmitted(true);
       setPendingPaymentIntentId(null);
+
+      // log the finished renewal to monday.com. runs in the background so the customer never waits on it
+      if (!crmSavedRef.current) {
+        void saveToCrm(buildCrmPayload(confirmation, paymentIntentId));
+      }
     } catch (error) {
       
       // if the renewal is fully done and the card was charged
@@ -1280,6 +1350,30 @@ export default function App() {
                 ))}
               </div>
             </div>
+
+            {/* monday.com crm status */}
+            {crmStatus !== "idle" && (
+              <div className="w-full flex flex-col gap-2">
+                <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
+                  <span style={{ color: "var(--muted-foreground)" }}>CRM record (Monday.com)</span>
+                  <span className="font-semibold" style={{ color: crmStatus === "saved" ? "#3a7d44" : crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>
+                    {crmStatus === "saving" ? "Saving..." : crmStatus === "saved" ? "Saved ✓" : "Not saved"}
+                  </span>
+                </div>
+                {crmMessage && (
+                  <p className="text-xs px-1" style={{ color: crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>{crmMessage}</p>
+                )}
+                {crmStatus === "failed" && (
+                  <button
+                    onClick={() => { if (crmPayloadRef.current) void saveToCrm(crmPayloadRef.current); }}
+                    className="self-start px-4 py-2 rounded-md text-xs font-semibold"
+                    style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}
+                  >
+                    Retry saving to CRM
+                  </button>
+                )}
+              </div>
+            )}
 
             <button
               onClick={() => { setSubmitted(false); setConfirmationNumber(""); setPrintError(""); setPendingPaymentIntentId(null); setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); }}
