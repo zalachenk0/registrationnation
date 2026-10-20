@@ -1,6 +1,15 @@
 import { useState, useRef, useEffect } from "react";
-import { chargeCard, connectToReader } from "./payment";
+import logoUrl from "./imports/RN_Logo.png";
+import { fillBlank, requestScan, submitPrint, type ScanResult } from "./integration";
+import { getPaymentConfig, PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment";
+import { CardPayment } from "./CardPayment";
+import { TerminalPayment } from "./TerminalPayment";
 import { createMondayRecord } from "./monday";
+import { CompletionTimer } from "./CompletionTimer";
+import { renewalError } from "./renewal";
+
+const STATE_CODES = "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split(" ");
+const stateName = (value = "") => value.toUpperCase() === "DC" ? "District of Columbia" : US_STATES[STATE_CODES.indexOf(value.toUpperCase())] || value;
 
 type Step = 1 | 2 | 3 | 4 | 5;
 
@@ -39,96 +48,6 @@ interface InsuranceInfo {
   agentPhone: string;
 }
 
-interface LicenseScanFields {
-  customer_first_name?: string;
-  customer_last_name?: string;
-  date_of_birth?: string;
-  street_address?: string;
-  city?: string;
-  state?: string;
-  zip_code?: string;
-  license_number?: string;
-  license_expiration?: string;
-  license_class?: string;
-}
-
-interface InsuranceScanFields {
-  vehicle_year?: string;
-  vehicle_make?: string;
-  vehicle_model?: string;
-  vehicle_vin?: string;
-  insurance_expiration?: string;
-}
-
-interface ScanResponse<T> {
-  success: boolean;
-  recommendation: string;
-  fields: T;
-}
-
-interface RegistrationPrintPayload {
-  registrant: string;
-  license_plate: string;
-  vehicle_year: string;
-  vehicle_make: string;
-  vehicle_model: string;
-  vin: string;
-  amount: string;
-  confirmation_number: string;
-}
-
-const STATE_NAMES: Record<string, string> = {
-  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
-  CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
-  HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas",
-  KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts",
-  MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana",
-  NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico",
-  NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma",
-  OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
-  SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont",
-  VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
-};
-
-async function scanDocument<T>(kind: "license" | "insurance", file: File): Promise<ScanResponse<T>> {
-  const body = new FormData();
-  body.append("image", file);
-  const response = await fetch(`/api/scan/${kind}`, { method: "POST", body });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `Scanner service returned ${response.status}.`);
-  }
-  if (!payload.success) {
-    throw new Error(payload.recommendation || "The document could not be read. Please retake the photo.");
-  }
-  return payload as ScanResponse<T>;
-}
-
-async function scanPiCamera<T>(kind: "license" | "insurance"): Promise<ScanResponse<T>> {
-  const response = await fetch(`/api/camera/scan/${kind}`, { method: "POST" });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `Camera service returned ${response.status}.`);
-  }
-  if (!payload.success) {
-    throw new Error(payload.recommendation || "The document could not be read. Reposition it and try again.");
-  }
-  return payload as ScanResponse<T>;
-}
-
-async function printRegistration(payload: RegistrationPrintPayload): Promise<void> {
-  const response = await fetch("/api/print/registration", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.success) {
-    throw new Error(result.error || "The registration mockup could not be printed.");
-  }
-}
-
-const RENEWAL_FEE_CENTS = 7100; // amount charged to card reader in cents, $71.00
 
 const US_STATES = [
   "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
@@ -271,32 +190,28 @@ function Step1({
   data,
   onChange,
   onLicenseScan,
+  licenseScanned,
 }: {
   data: PersonalInfo;
-  onChange: (d: PersonalInfo) => void;
-  onLicenseScan: (fields: LicenseScanFields) => void;
+  onChange: React.Dispatch<React.SetStateAction<PersonalInfo>>;
+  onLicenseScan: (result: ScanResult) => void;
+  licenseScanned: boolean;
 }) {
-  const [scanned, setScanned] = useState(false);
+  const [scanned, setScanned] = useState(licenseScanned);
+  const [expanded, setExpanded] = useState(licenseScanned || Boolean(data.firstName || data.address));
   const set = (k: keyof PersonalInfo) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     onChange({ ...data, [k]: e.target.value });
 
-  const handleScan = async (file?: File) => {
-    const result = file
-      ? await scanDocument<LicenseScanFields>("license", file)
-      : await scanPiCamera<LicenseScanFields>("license");
-    const fields = result.fields;
-    onChange({
-      ...data,
-      firstName: fields.customer_first_name || data.firstName,
-      lastName: fields.customer_last_name || data.lastName,
-      dateOfBirth: fields.date_of_birth || data.dateOfBirth,
-      address: fields.street_address || data.address,
-      city: fields.city || data.city,
-      state: STATE_NAMES[fields.state?.toUpperCase() || ""] || fields.state || data.state,
-      zip: fields.zip_code || data.zip,
-    });
-    onLicenseScan(fields);
+  const handleScan = (result: ScanResult) => {
     setScanned(true);
+    setExpanded(true);
+    const f = result.fields;
+    onChange(current => fillBlank(current, {
+      firstName: f.customer_first_name, lastName: f.customer_last_name,
+      dateOfBirth: f.date_of_birth, address: f.street_address,
+      city: f.city, state: stateName(f.state), zip: f.zip_code,
+    }));
+    onLicenseScan(result);
   };
 
   return (
@@ -307,6 +222,7 @@ function Step1({
         docType="license"
         scanned={scanned}
         onScan={handleScan}
+        onManual={() => setExpanded(true)}
       />
 
       {/* Contact — always manual */}
@@ -327,7 +243,7 @@ function Step1({
       </div>
 
       {/* Personal fields — pre-filled by scan, editable */}
-      {scanned && (
+      {expanded && (
         <div className="flex flex-col gap-5">
           <div className="flex items-center gap-3">
             <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
@@ -354,6 +270,7 @@ function Step1({
             </Field>
             <Field label="State" required>
               <SelectEl value={data.state} onChange={set("state")}>
+                {data.state && !US_STATES.includes(data.state) && <option>{data.state}</option>}
                 <option value="">Select</option>
                 {US_STATES.map((s) => <option key={s}>{s}</option>)}
               </SelectEl>
@@ -368,7 +285,149 @@ function Step1({
   );
 }
 
-type ScanState = "idle" | "scanning" | "done" | "error";
+type ScanState = "idle" | "scanning" | "done";
+
+function CameraModal({
+  docType,
+  onCapture,
+  onClose,
+}: {
+  docType: "license" | "insurance";
+  onCapture: () => void;
+  onClose: () => void;
+}) {
+  const [frameUrl, setFrameUrl] = useState("");
+  const [camError, setCamError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let currentUrl = "";
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      let delay = 200;
+      try {
+        const response = await fetch("/api/camera/frame.jpg", { cache: "no-store", signal: controller.signal });
+        if (!response.ok) {
+          const detail = await response.json();
+          throw new Error(detail.error || "Camera unavailable.");
+        }
+        const blob = await response.blob();
+        if (controller.signal.aborted) return;
+        const next = URL.createObjectURL(blob);
+        setFrameUrl(next);
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = next;
+        setCamError("");
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setFrameUrl("");
+        setCamError(error instanceof Error ? error.message : "Camera unavailable.");
+        delay = 1500;
+      }
+      if (!controller.signal.aborted) timer = setTimeout(refresh, delay);
+    }
+    void refresh();
+    return () => { controller.abort(); clearTimeout(timer); if (currentUrl) URL.revokeObjectURL(currentUrl); };
+  }, []);
+
+  const handleCapture = () => { if (frameUrl && !camError) onCapture(); };
+  const handleClose = onClose;
+
+  const [insuranceFormat, setInsuranceFormat] = useState<"paper" | "phone">("paper");
+  const shape = docType === "license" ? "license" : insuranceFormat;
+  const guides = {
+    license: {
+      title: "Position Your Driver’s License",
+      subtitle: "Place the back of your license under the camera, long edge horizontal.",
+      position: "Landscape · Back side", label: "Keep your whole license visible",
+      detail: "Keep the full barcode visible",
+      tip: "Center the license beneath the camera. Keep all four corners visible and hold it still.",
+    },
+    paper: {
+      title: "Position Your Insurance Form",
+      subtitle: "Place your letter-size form under the camera, turned sideways.",
+      position: "Landscape · 8½ × 11 in paper", label: "Keep the whole page visible",
+      detail: "Keep every edge visible",
+      tip: "Lay the page flat. Keep the text clear, with no folds, shadows or glare.",
+    },
+    phone: {
+      title: "Position Your Insurance Screen",
+      subtitle: "Rotate your phone sideways and open your proof of insurance.",
+      position: "Landscape · Phone screen", label: "Keep your whole phone screen visible",
+      detail: "Keep the insurance details visible",
+      tip: "Increase screen brightness and keep the display awake. Tilt slightly if there is glare.",
+    },
+  };
+  const guide = guides[shape];
+
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="camera-guide-title"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.82)", backdropFilter: "blur(4px)" }}>
+      <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-xl p-6 flex flex-col gap-4"
+        style={{ backgroundColor: "#111820", color: "#fff" }}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p id="camera-guide-title" className="font-semibold text-xl">{guide.title}</p>
+            <p className="text-sm mt-2 leading-relaxed" style={{ color: "#bcc6d2" }}>{guide.subtitle}</p>
+          </div>
+          <button aria-label="Close scanner" onClick={handleClose}
+            className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center"
+            style={{ backgroundColor: "#202b37", border: "1px solid #3e4855", color: "#fff" }}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+
+        {docType === "insurance" && (
+          <div className="flex gap-2" role="group" aria-label="Insurance document format">
+            {(["paper", "phone"] as const).map(format => (
+              <button key={format} type="button" aria-pressed={insuranceFormat === format}
+                onClick={() => setInsuranceFormat(format)} className="flex-1 rounded-lg px-3 py-3 text-sm font-medium"
+                style={{ border: `1px solid ${insuranceFormat === format ? "var(--accent)" : "#465260"}`,
+                  color: insuranceFormat === format ? "#fff" : "#cbd4df",
+                  backgroundColor: insuranceFormat === format ? "#30261f" : "#202b37" }}>
+                {format === "paper" ? "Paper form" : "Phone screen"}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs uppercase tracking-widest text-center mt-1" style={{ color: "#bdc7d3" }}>{guide.position}</p>
+        <div className="relative shrink-0" style={{ aspectRatio: "16/9", backgroundColor: "#090e15" }}>
+          {camError || !frameUrl ? (
+            <div role="status" className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm" style={{ color: "#cbd4df" }}>
+              {camError || "Starting the Pi camera…"}
+            </div>
+          ) : (
+            <img src={frameUrl} alt="Live Arducam preview" className="absolute inset-0 w-full h-full object-contain" />
+          )}
+        </div>
+        <div className="text-center">
+          <p className="text-base font-medium">{guide.label}</p>
+          <p className="text-xs mt-1" style={{ color: "#a6b4c4" }}>{guide.detail}</p>
+          <p className="text-sm mt-3 leading-relaxed" style={{ color: "#bcc6d2" }}>{guide.tip}</p>
+        </div>
+
+        <div className="flex gap-3">
+          <button onClick={handleClose} className="flex-1 py-3 rounded-lg text-sm font-medium"
+            style={{ backgroundColor: "#202b37", color: "#e2e8ef", border: "1px solid #455260" }}>Cancel</button>
+          <button onClick={handleCapture} disabled={!frameUrl || Boolean(camError)}
+            className="flex-[2] py-3 rounded-lg text-sm font-semibold disabled:opacity-40 flex items-center justify-center gap-2"
+            style={{ backgroundColor: "var(--accent)", color: "#fff" }}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <circle cx="9" cy="9" r="6" stroke="currentColor" strokeWidth="1.8" />
+              <circle cx="9" cy="9" r="3" fill="currentColor" />
+            </svg>
+            Capture &amp; Scan
+          </button>
+        </div>
+        <p className="text-xs text-center" style={{ color: "#aab8c7" }}>Hold still, then select Capture &amp; Scan.</p>
+      </div>
+    </div>
+  );
+}
 
 function ScanPrompt({
   title,
@@ -376,170 +435,132 @@ function ScanPrompt({
   docType,
   scanned,
   onScan,
+  onManual,
 }: {
   title: string;
   subtitle: string;
   docType: "license" | "insurance";
   scanned: boolean;
-  onScan: (file?: File) => Promise<void>;
+  onScan: (result: ScanResult) => void;
+  onManual?: () => void;
 }) {
   const [state, setState] = useState<ScanState>(scanned ? "done" : "idle");
-  const [preview, setPreview] = useState<string | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+
   const [error, setError] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [recommendation, setRecommendation] = useState("");
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => { pending.current?.abort(); }, []);
 
-  const handleFile = async (file: File) => {
-    if (!file.type.startsWith("image/")) {
-      setError("Please select a JPG, PNG, or other image file.");
-      setState("error");
-      return;
-    }
-    setState("scanning");
+  const handleCapture = async () => {
+    if (pending.current) return;
+    setCameraOpen(false);
     setError("");
-    const url = URL.createObjectURL(file);
-    setPreview(url);
+    setState("scanning");
+    const controller = new AbortController();
+    pending.current = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 120000);
     try {
-      await onScan(file);
+      const result = await requestScan(docType, controller.signal);
+      if (controller.signal.aborted) return;
+      onScan(result);
+      setRecommendation(result.recommendation || "");
       setState("done");
-    } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Scan failed. Please try again.");
-      setState("error");
+    } catch (err) {
+      if (controller.signal.aborted && !timedOut) return;
+      setError(timedOut ? "Scan timed out. Wait for processing to finish, then retry or enter the fields manually." : err instanceof Error ? err.message : "Scan failed. Please try again.");
+      setState("idle");
+      onManual?.();
+    } finally {
+      clearTimeout(timeout);
+      if (pending.current === controller) pending.current = null;
     }
   };
-
-  const handleCamera = async () => {
-    setState("scanning");
-    setError("");
-    setPreview(null);
-    try {
-      await onScan();
-      setState("done");
-    } catch (scanError) {
-      setError(scanError instanceof Error ? scanError.message : "Camera scan failed. Please try again.");
-      setState("error");
-    }
-  };
-
-  const iconPath =
-    docType === "license"
-      ? "M2 5a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3 2h3v3H5V7zm5 0h4M5 12h8"
-      : "M4 4h16v14H4V4zm4 4h8M4 10h16M8 14h5";
 
   return (
-    <div
-      className="rounded-xl overflow-hidden transition-all duration-300"
-      style={{ border: `2px ${state === "done" ? "solid" : "dashed"} ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
-    >
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
-      />
-
-      {state === "idle" && (
-        <div className="flex flex-col items-center gap-4 px-6 py-8 text-center">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ color: "var(--primary)" }}>
-              <rect x="2" y="6" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M8 6l1.2-2.4A1 1 0 0110.1 3h3.8a1 1 0 01.9.6L16 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              <circle cx="18.5" cy="9.5" r="1" fill="currentColor" />
-            </svg>
-          </div>
-          <div>
-            <p className="font-semibold text-sm mb-1" style={{ color: "var(--foreground)" }}>{title}</p>
-            <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{subtitle}</p>
-          </div>
-          <button
-            onClick={handleCamera}
-            className="flex items-center justify-center gap-2 px-8 py-3 rounded-lg text-sm font-semibold transition-all duration-150"
-            style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#d95c1a"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--accent)"; }}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <rect x="1" y="3" width="14" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-              <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-              <circle cx="12.5" cy="5.5" r="1" fill="currentColor" />
-            </svg>
-            Capture & Scan
-          </button>
-          <button
-            onClick={() => fileRef.current?.click()}
-            className="text-xs underline underline-offset-2"
-            style={{ color: "var(--muted-foreground)" }}
-          >
-            Upload an image instead
-          </button>
-        </div>
+    <>
+      {cameraOpen && (
+        <CameraModal
+          docType={docType}
+          onCapture={handleCapture}
+          onClose={() => { setCameraOpen(false); onManual?.(); }}
+        />
       )}
 
-      {state === "scanning" && (
-        <div className="flex flex-col items-center gap-4 px-6 py-8 relative overflow-hidden">
-          {preview && (
-            <div className="w-full max-h-36 overflow-hidden rounded-lg opacity-50" style={{ border: "1px solid var(--border)" }}>
-              <img src={preview} alt="Scanning" className="w-full object-cover" />
+      <div
+        className="rounded-xl overflow-hidden transition-all duration-300"
+        style={{ border: `2px ${state === "done" ? "solid" : "dashed"} ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
+      >
+        {state === "idle" && (
+          <div className="flex flex-col items-center gap-4 px-6 py-8 text-center">
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ color: "var(--primary)" }}>
+                <rect x="2" y="6" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M8 6l1.2-2.4A1 1 0 0110.1 3h3.8a1 1 0 01.9.6L16 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <circle cx="18.5" cy="9.5" r="1" fill="currentColor" />
+              </svg>
             </div>
-          )}
-          <div className="flex items-center gap-3">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="animate-spin" style={{ color: "var(--primary)" }}>
-              <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="2" strokeOpacity="0.2" />
-              <path d="M10 2a8 8 0 018 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-            <span className="text-sm font-medium" style={{ color: "var(--primary)" }}>Scanning document…</span>
+            <div>
+              <p className="font-semibold text-sm mb-1" style={{ color: "var(--foreground)" }}>{title}</p>
+              <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }} role={error ? "alert" : undefined}>{error || subtitle}</p>
+            </div>
+            <button
+              onClick={() => setCameraOpen(true)}
+              className="flex items-center justify-center gap-2 px-8 py-3 rounded-lg text-sm font-semibold transition-all duration-150"
+              style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#d95c1a"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--accent)"; }}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <rect x="1" y="3" width="14" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.4" />
+                <circle cx="12.5" cy="5.5" r="1" fill="currentColor" />
+              </svg>
+              Open Scanner
+            </button>
           </div>
-          {/* scan line animation */}
-          <style>{`@keyframes scanline { 0%{top:10%} 100%{top:90%} }`}</style>
-          <div className="absolute inset-x-6 top-4 bottom-4 pointer-events-none rounded-lg overflow-hidden" style={{ border: "1px solid rgba(26,58,92,0.15)" }}>
-            <div className="absolute inset-x-0 h-0.5" style={{ backgroundColor: "var(--accent)", opacity: 0.8, animation: "scanline 1.2s ease-in-out infinite alternate", top: "50%" }} />
-          </div>
-        </div>
-      )}
+        )}
 
-      {state === "done" && (
-        <div className="flex items-center gap-4 px-5 py-4">
-          {preview ? (
-            <div className="w-16 h-10 rounded-md overflow-hidden shrink-0" style={{ border: "1px solid #b8ddb4" }}>
-              <img src={preview} alt="Scanned" className="w-full h-full object-cover" />
+        {state === "scanning" && (
+          <div className="flex flex-col items-center gap-4 px-6 py-8 relative overflow-hidden">
+            <div className="flex items-center gap-3">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="animate-spin" style={{ color: "var(--primary)" }}>
+                <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="2" strokeOpacity="0.2" />
+                <path d="M10 2a8 8 0 018 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              <span className="text-sm font-medium" style={{ color: "var(--primary)" }}>Reading document…</span>
             </div>
-          ) : (
+            <style>{`@keyframes scanline { 0%{top:10%} 100%{top:90%} }`}</style>
+            <div className="absolute inset-x-6 top-4 bottom-4 pointer-events-none rounded-lg overflow-hidden" style={{ border: "1px solid rgba(26,58,92,0.15)" }}>
+              <div className="absolute inset-x-0 h-0.5" style={{ backgroundColor: "var(--accent)", opacity: 0.8, animation: "scanline 1.2s ease-in-out infinite alternate", top: "50%" }} />
+            </div>
+          </div>
+        )}
+
+        {state === "done" && (
+          <div className="flex items-center gap-4 px-5 py-4">
             <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: "#3a7d44" }}>
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M3 8l3.5 3.5 6.5-6.5" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>
-          )}
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold" style={{ color: "#2d6636" }}>Document scanned successfully</p>
-            <p className="text-xs truncate" style={{ color: "#3a7d44" }}>Fields below have been pre-filled — review and correct as needed.</p>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold" style={{ color: "#2d6636" }}>Document scanned successfully</p>
+              <p className="text-xs truncate" style={{ color: "#3a7d44" }} title={recommendation || undefined}>{recommendation || "Fields below have been pre-filled — review and correct as needed."}</p>
+            </div>
+            <button
+              onClick={() => { setState("idle"); }}
+              className="text-xs underline underline-offset-2 shrink-0"
+              style={{ color: "var(--muted-foreground)" }}
+            >
+              Rescan
+            </button>
           </div>
-          <button
-            onClick={() => { setState("idle"); setPreview(null); }}
-            className="text-xs underline underline-offset-2 shrink-0"
-            style={{ color: "var(--muted-foreground)" }}
-          >
-            Rescan
-          </button>
-        </div>
-      )}
-
-      {state === "error" && (
-        <div className="flex flex-col items-center gap-3 px-6 py-6 text-center">
-          <p className="text-sm font-semibold" style={{ color: "#b42318" }}>Document scan failed</p>
-          <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>{error}</p>
-          <button
-            onClick={() => { setState("idle"); setError(""); setPreview(null); fileRef.current?.click(); }}
-            className="px-5 py-2.5 rounded-lg text-sm font-semibold"
-            style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
-          >
-            Try Again
-          </button>
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -566,6 +587,7 @@ function Step2({
           </Field>
           <Field label="Issuing State" required>
             <SelectEl value={data.licenseState} onChange={set("licenseState")}>
+                {data.licenseState && !US_STATES.includes(data.licenseState) && <option>{data.licenseState}</option>}
               <option value="">Select</option>
               {US_STATES.map((s) => <option key={s}>{s}</option>)}
             </SelectEl>
@@ -577,6 +599,7 @@ function Step2({
           </Field>
           <Field label="License Class" required>
             <SelectEl value={data.licenseClass} onChange={set("licenseClass")}>
+            {data.licenseClass && !["A", "B", "C", "D", "M"].includes(data.licenseClass) && <option>{data.licenseClass}</option>}
               <option value="">Select class</option>
               <option value="A">Class A — Commercial</option>
               <option value="B">Class B — Commercial</option>
@@ -595,40 +618,37 @@ function Step2({
 function Step3({
   data,
   onChange,
-  vehicle,
+  vehicleData,
   onVehicleChange,
-  onVehicleScan,
 }: {
   data: InsuranceInfo;
-  onChange: (d: InsuranceInfo) => void;
-  vehicle: DriversLicense;
-  onVehicleChange: (d: DriversLicense) => void;
-  onVehicleScan: (fields: InsuranceScanFields) => void;
+  onChange: React.Dispatch<React.SetStateAction<InsuranceInfo>>;
+  vehicleData: DriversLicense;
+  onVehicleChange: React.Dispatch<React.SetStateAction<DriversLicense>>;
 }) {
   const [insuranceScanned, setInsuranceScanned] = useState(false);
   const set = (k: keyof InsuranceInfo) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     onChange({ ...data, [k]: e.target.value });
   const setVehicle = (k: keyof DriversLicense) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    onVehicleChange({ ...vehicle, [k]: e.target.value });
+    onVehicleChange({ ...vehicleData, [k]: e.target.value });
 
-  const handleInsuranceScan = async (file?: File) => {
-    const result = file
-      ? await scanDocument<InsuranceScanFields>("insurance", file)
-      : await scanPiCamera<InsuranceScanFields>("insurance");
-    const fields = result.fields;
-    onChange({
-      ...data,
-      endDate: fields.insurance_expiration || data.endDate,
-    });
-    onVehicleScan(fields);
+  const handleInsuranceScan = (result: ScanResult) => {
     setInsuranceScanned(true);
+    const f = result.fields;
+    onChange(current => fillBlank(current, {
+      provider: f.insurance_company, policyNumber: f.policy_number, endDate: f.insurance_expiration,
+    }));
+    onVehicleChange(current => fillBlank(current, {
+      vehicleYear: f.vehicle_year, vehicleMake: f.vehicle_make, vehicleModel: f.vehicle_model,
+      vin: f.vehicle_vin?.length === 17 ? f.vehicle_vin : undefined,
+    }));
   };
 
   return (
     <div className="flex flex-col gap-6">
       <ScanPrompt
         title="Scan Proof of Insurance"
-        subtitle="Place your insurance card or declaration page under the scanner to auto-fill the fields below."
+        subtitle="Upload your insurance card or declaration page to auto-fill your policy and vehicle details below."
         docType="insurance"
         scanned={insuranceScanned}
         onScan={handleInsuranceScan}
@@ -637,32 +657,30 @@ function Step3({
         className="rounded-lg p-5 flex flex-col gap-5"
         style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}
       >
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Vehicle Information</p>
-          <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>Filled automatically from the insurance scan when available. Review and complete any missing fields.</p>
-        </div>
+        <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Vehicle Information</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
           <Field label="Year" required>
-            <InputEl placeholder="2019" value={vehicle.vehicleYear} onChange={setVehicle("vehicleYear")} maxLength={4} />
+            <InputEl placeholder="2019" value={vehicleData.vehicleYear} onChange={setVehicle("vehicleYear")} maxLength={4} />
           </Field>
           <Field label="Make" required>
-            <InputEl placeholder="Toyota" value={vehicle.vehicleMake} onChange={setVehicle("vehicleMake")} />
+            <InputEl placeholder="Toyota" value={vehicleData.vehicleMake} onChange={setVehicle("vehicleMake")} />
           </Field>
           <Field label="Model" required>
-            <InputEl placeholder="Camry" value={vehicle.vehicleModel} onChange={setVehicle("vehicleModel")} />
+            <InputEl placeholder="Camry" value={vehicleData.vehicleModel} onChange={setVehicle("vehicleModel")} />
           </Field>
         </div>
         <Field label="VIN" required hint="17-character Vehicle Identification Number">
-          <InputEl placeholder="1HGBH41JXMN109186" value={vehicle.vin} onChange={setVehicle("vin")} maxLength={17} />
+          <InputEl placeholder="1HGBH41JXMN109186" value={vehicleData.vin} onChange={setVehicle("vin")} maxLength={17} />
         </Field>
         <Field label="Current License Plate" required>
-          <InputEl placeholder="ABC-1234" value={vehicle.licensePlate} onChange={setVehicle("licensePlate")} />
+          <InputEl placeholder="ABC-1234" value={vehicleData.licensePlate} onChange={setVehicle("licensePlate")} />
         </Field>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Field label="Insurance Provider" required>
           <SelectEl value={data.provider} onChange={set("provider")}>
             <option value="">Select provider</option>
+            {data.provider && !["State Farm", "Geico", "Progressive", "Allstate", "USAA", "Liberty Mutual", "Farmers", "Nationwide", "Travelers", "Other"].includes(data.provider) && <option>{data.provider}</option>}
             {["State Farm", "Geico", "Progressive", "Allstate", "USAA", "Liberty Mutual", "Nationwide", "Farmers", "Travelers", "Other"].map((p) => (
               <option key={p}>{p}</option>
             ))}
@@ -676,14 +694,14 @@ function Step3({
         <InputEl placeholder="Margaret Sullivan" value={data.policyHolder} onChange={set("policyHolder")} />
       </Field>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <Field label="Policy Start Date" required>
+        <Field label="Coverage Start Date (optional)">
           <InputEl type="date" value={data.startDate} onChange={set("startDate")} />
         </Field>
         <Field label="Policy End Date" required>
           <InputEl type="date" value={data.endDate} onChange={set("endDate")} />
         </Field>
       </div>
-      <Field label="Coverage Type" required>
+      <Field label="Policy Type (optional)">
         <SelectEl value={data.coverageType} onChange={set("coverageType")}>
           <option value="">Select coverage</option>
           <option value="liability">Liability Only</option>
@@ -710,114 +728,6 @@ function Step3({
     </div>
   );
 }
-
-function Step5({ amountCents }: { amountCents: number }) {
-  const [readerStatus, setReaderStatus] = useState<"connecting" | "ready" | "error">("connecting");
-  const [readerError, setReaderError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    setReaderStatus("connecting");
-    connectToReader()
-      .then(() => {
-        if (!cancelled) setReaderStatus("ready");
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setReaderStatus("error");
-          setReaderError(error instanceof Error ? error.message : "Could not connect to the card reader.");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const statusColor =
-    readerStatus === "ready" ? "#1b7a4c" : readerStatus === "error" ? "#b42318" : "#c9a227";
-  const statusText =
-    readerStatus === "connecting"
-      ? "Connecting to card reader..."
-      : readerStatus === "ready"
-      ? "Reader ready — tap, insert, or swipe"
-      : readerError || "Could not connect to the card reader.";
-
-  return (
-    <div className="flex flex-col gap-6">
-      {/* Test reader notice */}
-      <div className="rounded-lg p-4 flex gap-3" style={{ backgroundColor: "#fffbea", border: "1px solid #f5d76e" }}>
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" className="mt-0.5 shrink-0">
-          <path d="M9 2L16 15H2L9 2z" stroke="#b45309" strokeWidth="1.5" strokeLinejoin="round" fill="none" />
-          <path d="M9 7v4M9 12.5h.01" stroke="#b45309" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-        <div>
-          <p className="text-sm font-semibold" style={{ color: "#b45309" }}>Demo Mode — Simulated Reader</p>
-          <p className="text-xs mt-0.5" style={{ color: "#92400e" }}>
-            No physical card needed yet. Selecting "Pay &amp; Print" below runs a real (test-mode) Stripe charge against a simulated card reader.
-          </p>
-        </div>
-      </div>
-
-      {/* Fee summary */}
-      <div className="rounded-lg overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-        <div className="px-5 py-3" style={{ backgroundColor: "var(--secondary)" }}>
-          <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--primary)" }}>Fee Summary</p>
-        </div>
-        <div className="px-5 py-1">
-          {[
-            { label: "Registration Renewal Fee", value: "$51.75" },
-            { label: "State Processing Fee", value: "$4.75" },
-            { label: "County Road & Bridge", value: "$11.50" },
-            { label: "Service Fee", value: "$3.00" },
-          ].map((r) => (
-            <div key={r.label} className="flex justify-between py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
-              <span className="text-sm" style={{ color: "var(--muted-foreground)" }}>{r.label}</span>
-              <span className="text-sm font-medium">{r.value}</span>
-            </div>
-          ))}
-          <div className="flex justify-between py-3">
-            <span className="text-sm font-semibold">Total Due</span>
-            <span className="text-base font-bold" style={{ color: "var(--primary)" }}>${(amountCents / 100).toFixed(2)}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Reader status */}
-      <div
-        className="rounded-lg p-5 flex items-center gap-3"
-        style={{
-          border: `1.5px solid ${readerStatus === "error" ? "#f2b8b5" : "var(--border)"}`,
-          backgroundColor: readerStatus === "ready" ? "#eef6f1" : "var(--card)",
-        }}
-      >
-        <span className="shrink-0 rounded-full" style={{ width: 10, height: 10, backgroundColor: statusColor }} />
-        <div>
-          <p className="text-sm font-medium" style={{ color: "var(--foreground)" }}>{statusText}</p>
-          {readerStatus === "ready" && (
-            <p className="text-xs mt-0.5" style={{ color: "var(--muted-foreground)" }}>
-              Select "Pay & Print" below once the customer presents their card.
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* Security badges */}
-      <div className="flex items-center justify-center gap-5 pt-2">
-        {[
-          { icon: "🔒", label: "PCI-Compliant Reader" },
-          { icon: "🛡️", label: "Stripe Terminal" },
-          { icon: "✓", label: "Card Never Touches This Screen" },
-        ].map((b) => (
-          <div key={b.label} className="flex items-center gap-1.5">
-            <span className="text-sm">{b.icon}</span>
-            <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>{b.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 
 function EditableRow({
   label,
@@ -964,9 +874,9 @@ function Step4({
         <EditableRow label="Provider"      value={insurance.provider}     onChange={si("provider")} />
         <EditableRow label="Policy Number" value={insurance.policyNumber} onChange={si("policyNumber")} />
         <EditableRow label="Policy Holder" value={insurance.policyHolder} onChange={si("policyHolder")} />
-        <EditableRow label="Start Date"    value={insurance.startDate}    onChange={si("startDate")} type="date" />
+        <EditableRow label="Start Date (optional)"    value={insurance.startDate}    onChange={si("startDate")} type="date" />
         <EditableRow label="End Date"      value={insurance.endDate}      onChange={si("endDate")} type="date" />
-        <EditableRow label="Coverage Type" value={insurance.coverageType} onChange={si("coverageType")} options={["liability","collision","comprehensive","full","uninsured"]} />
+        <EditableRow label="Policy Type (optional)" value={insurance.coverageType} onChange={si("coverageType")} options={["","liability","collision","comprehensive","full","uninsured"]} />
       </EditableSection>
 
       <div className="rounded-lg p-4 flex gap-3 items-start" style={{ backgroundColor: "#f0f7ee", border: "1px solid #b8ddb4" }}>
@@ -1004,7 +914,7 @@ function AdminLogin({ onLogin }: { onLogin: () => void }) {
       <div className="w-full max-w-sm flex flex-col items-center gap-8">
         <div className="flex flex-col items-center gap-3">
           <div className="bg-white rounded-2xl p-3 shadow-lg">
-            <img src="/RN_Logo.png" alt="Registration Nation" className="h-24 w-auto object-contain" />
+            <img src={logoUrl} alt="Registration Nation" className="h-14 w-auto" />
           </div>
           <div className="text-center">
             <p className="text-white font-semibold text-lg" style={{ fontFamily: "'DM Serif Display', serif" }}>Texas Tag & Title</p>
@@ -1075,10 +985,25 @@ export default function App() {
   const [authed, setAuthed] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [submitted, setSubmitted] = useState(false);
-  const [paymentStage, setPaymentStage] = useState<"idle" | "charging" | "printing">("idle");
-  const [pendingPaymentIntentId, setPendingPaymentIntentId] = useState<string | null>(null);
-  const [printError, setPrintError] = useState("");
-  const [confirmationNumber, setConfirmationNumber] = useState("");
+
+  const cardEntry = useRef<CardEntry | null>(null);
+  const [paymentReady, setPaymentReady] = useState(false);
+
+  // payment method: the S700 card reader is the primary option and the typed card is the backup.
+  // null = still asking the server which methods are set up
+  const [paymentMode, setPaymentMode] = useState<"terminal" | "card" | null>(null);
+  const [readerAvailable, setReaderAvailable] = useState(false);
+  const [readerProblem, setReaderProblem] = useState("");
+  useEffect(() => {
+    let active = true;
+    getPaymentConfig().then(config => {
+      if (!active) return;
+      setReaderAvailable(!!config.terminal?.enabled);
+      setReaderProblem(config.terminal?.problem || "");
+      setPaymentMode(current => current ?? (config.terminal?.enabled ? "terminal" : "card"));
+    }).catch(() => { if (active) setPaymentMode(current => current ?? "card"); });  // the card form shows the real error
+    return () => { active = false; };
+  }, []);
 
   // monday.com crm record, shown on the success screen
   const [crmStatus, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
@@ -1096,24 +1021,12 @@ export default function App() {
   });
   const [licensePrefilled, setLicensePrefilled] = useState(false);
 
-  const handleLicenseScan = (fields: LicenseScanFields) => {
+  const handleLicenseScan = (result: ScanResult) => {
     setLicensePrefilled(true);
-    setLicense((current) => ({
-      ...current,
-      licenseNumber: fields.license_number || current.licenseNumber,
-      licenseState: STATE_NAMES[fields.state?.toUpperCase() || ""] || fields.state || current.licenseState,
-      expirationDate: fields.license_expiration || current.expirationDate,
-      licenseClass: fields.license_class || current.licenseClass,
-    }));
-  };
-
-  const handleInsuranceVehicleScan = (fields: InsuranceScanFields) => {
-    setLicense((current) => ({
-      ...current,
-      vehicleYear: fields.vehicle_year || current.vehicleYear,
-      vehicleMake: fields.vehicle_make || current.vehicleMake,
-      vehicleModel: fields.vehicle_model || current.vehicleModel,
-      vin: fields.vehicle_vin || current.vin,
+    const f = result.fields;
+    setLicense(current => fillBlank(current, {
+      licenseNumber: f.license_number, licenseState: stateName(f.state),
+      expirationDate: f.license_expiration, licenseClass: f.license_class,
     }));
   };
   const [insurance, setInsurance] = useState<InsuranceInfo>({
@@ -1121,22 +1034,11 @@ export default function App() {
     endDate: "", coverageType: "", agentName: "", agentPhone: "",
   });
 
-  const stepTitles: Record<Step, string> = {
-    1: "Personal Information",
-    2: "Driver's License Details",
-    3: "Insurance & Vehicle",
-    4: "Review & Confirm",
-    5: "Payment",
-  };
-
-  const stepSubtitles: Record<Step, string> = {
-    1: "Scan your driver's license — we'll fill in the rest. Just add your email and phone.",
-    2: "Confirm the details extracted from your driver's license.",
-    3: "Scan your insurance document to fill vehicle details, then review the insurance information.",
-    4: "Review all information before proceeding to payment.",
-    5: "Tap, insert, or swipe your card to complete the $71.00 renewal payment.",
-  };
-
+  const [printing, setPrinting] = useState(false);
+  const [paid, setPaid] = useState<PaymentResult | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState("");
+  const printPending = useRef(false);
+  const printReference = useRef(sessionStorage.getItem("kiosk-payment-reference") || "");
   // builds what we send to monday.com. the server only forwards the fields listed in COLUMN_MAP (monday_service.py)
   const buildCrmPayload = (confirmation: string, paymentIntentId: string) => {
     const fullName = `${personal.firstName} ${personal.lastName}`.trim();
@@ -1167,7 +1069,7 @@ export default function App() {
         policyNumber: insurance.policyNumber,
         insuranceExpiration: insurance.endDate,
         service: "Vehicle Registration Renewal",
-        amountPaid: (RENEWAL_FEE_CENTS / 100).toFixed(2),
+        amountPaid: (PAYMENT_AMOUNT / 100).toFixed(2),
         confirmationNumber: confirmation,
         paymentIntentId,
         paidDate: new Date().toISOString().slice(0, 10),
@@ -1192,68 +1094,66 @@ export default function App() {
     }
   };
 
-  const handlePaymentAndPrint = async () => { // if payment was already received, reuses charge without charging again to print receipt
-    setPrintError("");
-    
-    let paymentIntentId = pendingPaymentIntentId;
-
-    if (!paymentIntentId) {
-      crmSavedRef.current = false;  // brand new transaction, so forget the last customer's crm status
-      setCrmStatus("idle");
-      setCrmMessage("");
-      setPaymentStage("charging");
-      const chargeResult = await chargeCard(RENEWAL_FEE_CENTS, personal.email || undefined);
-      if (!chargeResult.success) {
-        setPrintError(chargeResult.error);
-        setPaymentStage("idle");
-        return;
-      }
-      paymentIntentId = chargeResult.paymentIntentId;
-      setPendingPaymentIntentId(paymentIntentId);
-    }
-
-    const confirmation = `REG-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    setPaymentStage("printing");
+  const handlePrint = async () => {
+    if (printPending.current) return;
+    const error = renewalError(personal, license, insurance);
+    if (error) { window.alert(error); return; }
+    printPending.current = true;
+    setPrinting(true);
+    if (!printReference.current) printReference.current = `REG-${crypto.randomUUID().toUpperCase()}`;
+    sessionStorage.setItem("kiosk-payment-reference", printReference.current);
+    let confirmed = paid;
     try {
-      await printRegistration({
-        registrant: `${personal.firstName} ${personal.lastName}`.trim(),
-        license_plate: license.licensePlate,
-        vehicle_year: license.vehicleYear,
-        vehicle_make: license.vehicleMake,
-        vehicle_model: license.vehicleModel,
-        vin: license.vin,
-        amount: "$71.00",
-        confirmation_number: confirmation,
-      });
-      setConfirmationNumber(confirmation);
+      const payload = { registrant: `${personal.firstName} ${personal.lastName}`,
+        license_plate: license.licensePlate, vehicle_year: license.vehicleYear,
+        vehicle_make: license.vehicleMake, vehicle_model: license.vehicleModel,
+        vin: license.vin, confirmation_number: printReference.current };
+      if (!paid && !cardEntry.current) throw new Error("Wait for the card reader or card form to finish loading, then retry.");
+      confirmed = paid || await cardEntry.current!.pay(payload, setPaymentStatus);
+      if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
+      setPaid(confirmed);
+      setPaymentStatus("Test payment confirmed. Sending to printer…");
+      await submitPrint(payload);
       setSubmitted(true);
-      setPendingPaymentIntentId(null);
 
       // log the finished renewal to monday.com. runs in the background so the customer never waits on it
-      if (!crmSavedRef.current) {
-        void saveToCrm(buildCrmPayload(confirmation, paymentIntentId));
-      }
+      if (!crmSavedRef.current) void saveToCrm(buildCrmPayload(payload.confirmation_number, confirmed.id));
     } catch (error) {
-      
-      // if the renewal is fully done and the card was charged
-      // pendingPaymentIntentId stays set so the next click retries only the print and not the charge
-      
-      setPrintError(error instanceof Error ? error.message : "Printing failed. Please try again.");
+      const message = error instanceof Error ? error.message : "Payment or printing failed. Your form is still available.";
+      setPaymentStatus(confirmed ? "Test payment confirmed. Retry printing without paying again." : "Payment not confirmed. Retry to check the same transaction.");
+      window.alert((confirmed ? "Test payment succeeded; do not pay again. " : "") + message);
     } finally {
-      setPaymentStage("idle");
+      printPending.current = false;
+      setPrinting(false);
     }
+  };
+
+  const stepTitles: Record<Step, string> = {
+    1: "Personal Information",
+    2: "Driver's License",
+    3: "Insurance & Vehicle Details",
+    4: "Review & Confirm",
+    5: "Payment",
+  };
+
+  const stepSubtitles: Record<Step, string> = {
+    1: "Scan your driver's license — we'll fill in the rest. Just add your email and phone.",
+    2: "Confirm the driver's license details captured by the scanner.",
+    3: "Scan your proof of insurance to fill in your policy and vehicle information.",
+    4: "Review all information before proceeding to payment.",
+    5: "Complete your $114.25 renewal payment securely.",
   };
 
   if (!authed) return <AdminLogin onLogin={() => setAuthed(true)} />;
 
   if (submitted) {
-    const confNum = confirmationNumber;
+    const confNum = printReference.current;
     return (
       <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--background)" }}>
         {/* Header */}
         <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
           <div className="max-w-2xl mx-auto px-6 py-3 flex items-center justify-between">
-            <img src="/RN_Logo.png" alt="Registration Nation" className="h-16 w-auto object-contain" />
+            <img src={logoUrl} alt="Registration Nation" className="h-12 w-auto object-contain" />
             <div className="text-right">
               <p className="text-xs font-semibold tracking-wider uppercase" style={{ color: "var(--muted-foreground)" }}>Texas Tag & Title</p>
               <p className="text-sm font-medium" style={{ color: "var(--primary)" }}>Vehicle Registration Renewal</p>
@@ -1265,10 +1165,10 @@ export default function App() {
           <div className="max-w-lg w-full flex flex-col items-center gap-8">
 
             {/* Printing graphic */}
-            <div className="relative flex flex-col items-center">
+            <div className="relative flex flex-col items-center h-40 shrink-0">
               <style>{`
                 @keyframes printSlide { 0%{transform:translateY(-8px);opacity:0} 60%{opacity:1} 100%{transform:translateY(0);opacity:1} }
-                @keyframes pulse-ring { 0%,100%{opacity:0.4;transform:scale(1)} 50%{opacity:0.15;transform:scale(1.15)} }
+                @keyframes pulse-ring { 0%,100%{opacity:0.12;transform:translate(-50%,-50%) scale(1)} 50%{opacity:0.06;transform:translate(-50%,-50%) scale(1.15)} }
               `}</style>
 
               {/* Printer body */}
@@ -1309,10 +1209,10 @@ export default function App() {
                   <div className="rounded shadow-md" style={{ width: "54px", backgroundColor: "#fff", border: "1px solid var(--border)" }}>
                     <div className="p-1.5 flex flex-col gap-0.5">
                       <p className="font-bold" style={{ fontSize: "5px", color: "var(--primary)", letterSpacing: "0.08em" }}>RECEIPT</p>
-                      {[`${personal.firstName} ${personal.lastName}`, license.licensePlate, "$71.00"].map((line, i) => (
+                      {[`${personal.firstName} ${personal.lastName}`, license.licensePlate, "$114.25"].map((line, i) => (
                         <div key={i} className="h-px w-full rounded" style={{ backgroundColor: i === 2 ? "var(--accent)" : "var(--border)", marginTop: i === 2 ? "3px" : undefined }} />
                       ))}
-                      <p style={{ fontSize: "5px", color: "var(--muted-foreground)" }}>PAID · {new Date().toLocaleDateString()}</p>
+                      <p style={{ fontSize: "5px", color: "var(--muted-foreground)" }}>DEMO · {new Date().toLocaleDateString()}</p>
                     </div>
                   </div>
                 </div>
@@ -1324,10 +1224,24 @@ export default function App() {
 
             {/* Status text */}
             <div className="text-center flex flex-col gap-2">
-              <h2 className="text-3xl" style={{ color: "var(--foreground)" }}>Printing Now</h2>
+              <h2 className="text-3xl" style={{ color: "var(--foreground)" }}>Payment Complete — Printing Queued</h2>
               <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-                Payment verified — your registration sticker and receipt are printing. Please collect them from the printer.
+                Your $114.25 Stripe test payment succeeded and the mock sticker and receipt were accepted by the print queue. No real money was charged. Check the printer to collect them.
               </p>
+              {personal.email && (
+                <p className="text-xs mt-1 flex items-center justify-center gap-1.5" style={{ color: "var(--muted-foreground)" }}>
+                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0 }}>
+                    <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                    <path d="M1.5 3.5l5 3.5 5-3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Contact email (no receipt email is sent): <strong className="ml-0.5">{personal.email}</strong>
+                </p>
+              )}
+              {!personal.email && (
+                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+                  No receipt email is sent by this local demonstration.
+                </p>
+              )}
             </div>
 
             {/* Summary card */}
@@ -1340,7 +1254,8 @@ export default function App() {
                   { label: "Registrant", value: `${personal.firstName} ${personal.lastName}` },
                   { label: "Vehicle", value: `${license.vehicleYear} ${license.vehicleMake} ${license.vehicleModel}` },
                   { label: "Plate", value: license.licensePlate },
-                  { label: "Amount Paid", value: "$71.00" },
+                  { label: "Amount Paid", value: "$114.25 (Stripe test)" },
+                  { label: "Stripe Payment", value: paid?.id || "—" },
                   { label: "Confirmation #", value: confNum },
                 ].map((r) => (
                   <div key={r.label} className="flex justify-between items-center py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -1360,30 +1275,16 @@ export default function App() {
                     {crmStatus === "saving" ? "Saving..." : crmStatus === "saved" ? "Saved ✓" : "Not saved"}
                   </span>
                 </div>
-                {crmMessage && (
-                  <p className="text-xs px-1" style={{ color: crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>{crmMessage}</p>
-                )}
+                {crmMessage && <p className="text-xs px-1" style={{ color: crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>{crmMessage}</p>}
                 {crmStatus === "failed" && (
-                  <button
-                    onClick={() => { if (crmPayloadRef.current) void saveToCrm(crmPayloadRef.current); }}
-                    className="self-start px-4 py-2 rounded-md text-xs font-semibold"
-                    style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}
-                  >
+                  <button type="button" onClick={() => { if (crmPayloadRef.current) void saveToCrm(crmPayloadRef.current); }} className="self-start px-4 py-2 rounded-md text-xs font-semibold" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>
                     Retry saving to CRM
                   </button>
                 )}
               </div>
             )}
 
-            <button
-              onClick={() => { setSubmitted(false); setConfirmationNumber(""); setPrintError(""); setPendingPaymentIntentId(null); setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); }}
-              className="px-8 py-3 rounded-lg text-sm font-semibold transition-all duration-150"
-              style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#142e4a"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--primary)"; }}
-            >
-              Start Next Customer
-            </button>
+            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />
           </div>
         </div>
       </div>
@@ -1396,9 +1297,9 @@ export default function App() {
       <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
         <div className="max-w-2xl mx-auto px-6 py-3 flex items-center justify-between">
           <img
-            src="/RN_Logo.png"
+            src={logoUrl}
             alt="Registration Nation"
-            className="h-16 w-auto object-contain"
+            className="h-12 w-auto object-contain"
           />
           <div className="text-right">
             <p className="text-xs font-semibold tracking-wider uppercase" style={{ color: "var(--muted-foreground)" }}>Texas Tag & Title</p>
@@ -1419,17 +1320,20 @@ export default function App() {
           className="rounded-xl p-7 mb-8"
           style={{ backgroundColor: "var(--card)", border: "1px solid var(--border)", boxShadow: "0 1px 4px rgba(15,25,35,0.06)" }}
         >
-          {step === 1 && <Step1 data={personal} onChange={setPersonal} onLicenseScan={handleLicenseScan} />}
+          {step === 1 && <Step1 data={personal} onChange={setPersonal} onLicenseScan={handleLicenseScan} licenseScanned={licensePrefilled} />}
           {step === 2 && <Step2 data={license} onChange={setLicense} />}
-          {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicle={license} onVehicleChange={setLicense} onVehicleScan={handleInsuranceVehicleScan} />}
+          {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicleData={license} onVehicleChange={setLicense} />}
           {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
-          {step === 5 && <Step5 amountCents={RENEWAL_FEE_CENTS} />}
+          {step === 5 && paymentMode === null && <p role="status" className="text-sm">Checking payment options…</p>}
+        {step === 5 && paymentMode === "terminal" && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} onUseManual={() => { setPaymentStatus(""); setPaymentMode("card"); }} />}
+        {step === 5 && paymentMode === "card" && <CardPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} notice={readerProblem} onUseReader={readerAvailable ? () => { setPaymentStatus(""); setPaymentMode("terminal"); } : undefined} />}
         </div>
 
         <div className="flex items-center justify-between">
           {step > 1 ? (
             <button
               onClick={() => setStep((s) => (s - 1) as Step)}
+              disabled={printing || !!paid}
               className="flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-md transition-all duration-150"
               style={{ color: "var(--primary)", border: "1.5px solid var(--border)", backgroundColor: "var(--card)" }}
               onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--primary)"; }}
@@ -1470,18 +1374,14 @@ export default function App() {
             </button>
           ) : (
             <button
-              onClick={handlePaymentAndPrint}
-              disabled={paymentStage !== "idle"}
+              onClick={handlePrint}
+              disabled={printing || (!paid && !paymentReady)}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
-              style={{ backgroundColor: "#3a7d44", color: "#ffffff", opacity: paymentStage !== "idle" ? 0.7 : 1 }}
+              style={{ backgroundColor: "#3a7d44", color: "#ffffff" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2d6636"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#3a7d44"; }}
             >
-              {paymentStage === "charging"
-                ? "Processing Payment..."
-                : paymentStage === "printing"
-                ? "Sending to Printer..."
-                : "Pay $71.00 & Print"}
+              {printing ? (paid ? "Sending to printer…" : "Processing payment…") : paid ? "Retry Printing" : "Pay $114.25"}
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -1489,14 +1389,8 @@ export default function App() {
           )}
         </div>
 
-        {printError && (
-          <p className="text-sm text-right mt-3" role="alert" style={{ color: "#b42318" }}>
-            {printError}
-          </p>
-        )}
-
         <p className="text-xs text-center mt-8" style={{ color: "var(--muted-foreground)" }}>
-          Fields marked with <span style={{ color: "#e05a1a" }}>*</span> are required. Your information is encrypted and transmitted securely.
+          Fields marked with <span style={{ color: "#e05a1a" }}>*</span> are required. Document scanning runs locally; card details are collected securely by Stripe.
         </p>
       </main>
     </div>

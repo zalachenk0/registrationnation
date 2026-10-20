@@ -1,239 +1,189 @@
 from __future__ import annotations
-
+import atexit
+import io
 import os
-import re
-import tempfile
-from datetime import datetime
+import threading
 from pathlib import Path
-from typing import Any
+from urllib.parse import urlsplit
 
+import cv2
+import numpy as np
+from PIL import Image, UnidentifiedImageError
+from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_from_directory
-from werkzeug.utils import secure_filename
-
-from driver_license_barcode_rev4 import AAMVAParser, DriverLicenseBarcodeScanner
-from insurance_card_ocr_rev3 import InsuranceCardOCR, InsuranceCardOCRConfig
-from camera_capture import CameraError, KioskCamera
-from printer_service import PrinterError, print_registration_mockup, printer_status
-from payment_service import PaymentError, create_connection_token, create_payment_intent, capture_payment_intent
+from camera_service import Camera, CameraError
+from extraction_service import scan_license, scan_insurance
+from kiosk_scanners.results import ScannerError
+from printing import PrintService, PrintError, create_pdf, printer_status
+from payment_service import PaymentService, PaymentError, configuration, create_connection_token
 from monday_service import MondayError, create_monday_record
 
-load_dotenv()
-
-PROJECT_DIR = Path(__file__).resolve().parent
-DIST_DIR = PROJECT_DIR / "dist"
-app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
-app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
-camera = KioskCamera()
-
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b", re.IGNORECASE)
-
-
-def aamva_date(value: str) -> str:
-    digits = re.sub(r"\D", "", value)
-    for fmt in ("%m%d%Y", "%Y%m%d", "%m%d%y"):
-        try:
-            return datetime.strptime(digits, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return ""
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / '.env')
+app = Flask(__name__, static_folder=None)
+app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
+app.config['TRUSTED_HOSTS'] = ['localhost', '127.0.0.1', '[::1]']
+camera = Camera()
+printer = PrintService()
+payments = PaymentService()
+scan_lock = threading.Lock()
+atexit.register(camera.close)
 
 
-def insurance_date(value: str) -> str:
-    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
-        try:
-            return datetime.strptime(value.strip(), fmt).date().isoformat()
-        except ValueError:
-            continue
-    return ""
+@app.before_request
+def local_requests():
+    if request.path.startswith('/api/'):
+        origin = request.headers.get('Origin')
+        if (origin and urlsplit(origin).netloc != request.host) or request.headers.get('Sec-Fetch-Site') == 'cross-site':
+            return jsonify(error='Use the kiosk from its local page.'), 403
+        if request.path.startswith('/api/payment/') and request.method == 'POST' and request.headers.get('X-Kiosk-Payment') != '1':
+            return jsonify(error='Use the payment controls on the local kiosk page.'), 403
 
 
-def uploaded_image() -> tuple[Path | None, tuple[Any, int] | None]:
-    upload = request.files.get("image")
-    if upload is None or not upload.filename:
-        return None, (jsonify(error="Attach an image in the 'image' field."), 400)
-
-    suffix = Path(secure_filename(upload.filename)).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        return None, (jsonify(error="Use a JPG, PNG, WEBP, BMP, or TIFF image."), 415)
-
-    handle = tempfile.NamedTemporaryFile(prefix="kiosk-scan-", suffix=suffix, delete=False)
-    path = Path(handle.name)
-    handle.close()
-    upload.save(path)
-    return path, None
+@app.after_request
+def headers(response):
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
 
 
-@app.get("/api/health")
+@app.errorhandler(HTTPException)
+def http_error(exc):
+    return jsonify(error='Image is too large (15 MB maximum).' if exc.code == 413 else exc.description), exc.code
+
+
+@app.get('/api/health')
 def health():
-    return jsonify(status="ok", camera=camera.status(), printer=printer_status())
+    return jsonify(status='ok', camera=camera.status(), printer=printer_status())
 
 
-def process_license(path: Path):
-    result = DriverLicenseBarcodeScanner().scan(path)
-    fields = dict(result.parsed_fields)
-    _, raw_fields = AAMVAParser().parse(result.raw_aamva)
-    fields.update(
-        date_of_birth=aamva_date(raw_fields.get("DBB", "")),
-        license_number=raw_fields.get("DAQ", "").strip(),
-        license_expiration=aamva_date(raw_fields.get("DBA", "")),
-        license_class=raw_fields.get("DCA", "").strip()[:1],
-    )
-    return jsonify(success=result.scan_success, recommendation=result.recommendation, fields=fields)
-
-
-def process_insurance(path: Path):
-    tesseract_cmd = os.getenv("TESSERACT_CMD") or None
-    result = InsuranceCardOCR(
-        InsuranceCardOCRConfig(tesseract_cmd=tesseract_cmd, save_debug=False)
-    ).extract(path)
-    fields = dict(result.parsed_fields)
-    vin_match = VIN_RE.search(result.raw_text.upper())
-    fields["vehicle_vin"] = vin_match.group(1) if vin_match else ""
-    fields["insurance_expiration"] = insurance_date(str(fields.get("insurance_expiration", "")))
-    return jsonify(success=result.scan_success, recommendation=result.recommendation, fields=fields)
-
-
-@app.post("/api/scan/license")
-def scan_license():
-    path, error = uploaded_image()
-    if error:
-        return error
-
-    assert path is not None
+@app.get('/api/camera/frame.jpg')
+def frame():
     try:
-        return process_license(path)
-    except Exception as exc:
-        app.logger.exception("Driver-license scan failed")
-        return jsonify(error=f"Driver-license scanner failed: {exc}"), 500
-    finally:
-        path.unlink(missing_ok=True)
-
-
-@app.post("/api/scan/insurance")
-def scan_insurance():
-    path, error = uploaded_image()
-    if error:
-        return error
-
-    assert path is not None
-    try:
-        return process_insurance(path)
-    except Exception as exc:
-        app.logger.exception("Insurance scan failed")
-        return jsonify(error=f"Insurance scanner failed: {exc}"), 500
-    finally:
-        path.unlink(missing_ok=True)
-
-
-@app.post("/api/camera/scan/<kind>")
-def capture_and_scan(kind: str):
-    if kind not in {"license", "insurance"}:
-        return jsonify(error="Scan type must be 'license' or 'insurance'."), 404
-    handle = tempfile.NamedTemporaryFile(prefix="kiosk-camera-", suffix=".jpg", delete=False)
-    path = Path(handle.name)
-    handle.close()
-    try:
-        camera.capture(path)
-        return process_license(path) if kind == "license" else process_insurance(path)
+        return Response(camera.get(preview=True), mimetype='image/jpeg')
     except CameraError as exc:
-        return jsonify(error=f"Camera capture failed: {exc}"), 503
-    except Exception as exc:
-        app.logger.exception("Camera scan failed")
-        return jsonify(error=f"Document scan failed: {exc}"), 500
-    finally:
-        path.unlink(missing_ok=True)
-
-
-@app.post("/api/print/registration")
-def print_registration():
-    payload = request.get_json(silent=True) or {}
-    required = ("registrant", "license_plate", "confirmation_number")
-    missing = [field for field in required if not str(payload.get(field, "")).strip()]
-    if missing:
-        return jsonify(error=f"Missing required print fields: {', '.join(missing)}."), 400
-
-    try:
-        job = print_registration_mockup(payload)
-        return jsonify(success=True, message="Mock registration sent to printer.", job=job)
-    except PrinterError as exc:
         return jsonify(error=str(exc)), 503
 
 
-# payment backend portion
-
-@app.post("/api/payment/connection_token") # actual stripe calls are in payment_service.py
-def payment_connection_token():            # this just translates between HTTP/JSON for that file
+def upload_image():
+    uploaded = request.files.get('image')
+    if uploaded is None:
+        raise ValueError('Upload an image in the image field.')
+    raw = uploaded.read()
     try:
-        secret = create_connection_token()
-        return jsonify(secret=secret)
-    except PaymentError as exc:
-        return jsonify(error=str(exc)), 500
+        with Image.open(io.BytesIO(raw)) as im:
+            if im.width * im.height > 20_000_000 or min(im.size) < 32:
+                raise ValueError('Use an image between 32 pixels per side and 20 megapixels.')
+            im.verify()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError('This file is not a readable image. Use JPG or PNG.') from exc
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError('The uploaded image could not be decoded.')
+    return image
 
 
-@app.post("/api/payment/create_intent")
+@app.post('/api/camera/scan/<kind>')
+@app.post('/api/scan/<kind>')
+def scan(kind):
+    if kind not in {'license', 'insurance'}:
+        return jsonify(error='Unknown document type.'), 404
+    if not scan_lock.acquire(blocking=False):
+        return jsonify(error='A scan is still processing. Wait for it to finish before trying again.'), 409
+    try:
+        image = camera.get() if request.path.startswith('/api/camera/') else upload_image()
+        result = scan_license(image) if kind == 'license' else scan_insurance(image)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
+    except (ScannerError, CameraError) as exc:
+        return jsonify(error=str(exc)), 503
+    except Exception:
+        # Do not log document contents or decoded personal information.
+        return jsonify(error='Document processing failed. Check the local OCR installation and try a sharper image.'), 500
+    finally:
+        scan_lock.release()
+
+
+@app.post('/api/print/preview')
+def preview_print():
+    try:
+        return Response(create_pdf(request.get_json(silent=True)), mimetype='application/pdf',
+                        headers={'Content-Disposition': 'inline; filename="mock-sticker-and-receipt.pdf"'})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
+
+
+@app.post('/api/print/registration')
+def print_registration():
+    try:
+        payload = request.get_json(silent=True)
+        paid = payments.verify_paid(payload)
+        return jsonify(success=True, **printer.submit(payload, payment=paid))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
+    except PrintError as exc:
+        return jsonify(error=str(exc)), 503
+
+
+@app.errorhandler(PaymentError)
+def payment_error(exc):
+    return jsonify(error=str(exc)), 409
+
+
+@app.get('/api/payment/config')
+def payment_config():
+    return jsonify(configuration())
+
+
+@app.post('/api/payment/create_intent')
 def payment_create_intent():
-    payload = request.get_json(silent=True) or {}
     try:
-        amount = int(payload.get("amount"))
-    except (TypeError, ValueError):
-        return jsonify(error="amount must be a whole number of cents"), 400
-
-    receipt_email = payload.get("receiptEmail") or None
-
-    try:
-        intent = create_payment_intent(amount, receipt_email=receipt_email)
-        return jsonify(**intent)
-    except PaymentError as exc:
-        return jsonify(error=str(exc)), 400
+        payload = request.get_json(silent=True)
+        mode = payload.get('payment_mode') if isinstance(payload, dict) else None  # 'terminal' (S700) or 'card' (typed)
+        return jsonify(payments.create_payment_intent(payload, mode=mode or 'card'))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
 
 
-@app.post("/api/payment/capture_intent")
+@app.post('/api/payment/capture_intent')
 def payment_capture_intent():
-    payload = request.get_json(silent=True) or {}
-    payment_intent_id = payload.get("paymentIntentId")
-    if not payment_intent_id:
-        return jsonify(error="paymentIntentId is required"), 400
-
     try:
-        result = capture_payment_intent(payment_intent_id)
-        return jsonify(**result)
-    except PaymentError as exc:
-        return jsonify(error=str(exc)), 500
-        
-# payment portion end 
+        return jsonify(payments.capture_payment_intent(request.get_json(silent=True)))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
 
 
-# monday.com crm portion
-# the form calls this after a renewal is paid and printed. the real work is in monday_service.py
+# lets the browser's Terminal SDK connect to the S700 (only works when a reader is set up in .env)
+@app.post('/api/payment/connection_token')
+def payment_connection_token():
+    return jsonify(secret=create_connection_token())
 
-@app.post("/api/monday/create_record")
+
+# monday.com crm: the form calls this after a renewal is paid and printed. the real work is in monday_service.py
+@app.post('/api/monday/create_record')
 def monday_create_record():
     payload = request.get_json(silent=True) or {}
     try:
-        result = create_monday_record(payload.get("itemName"), payload.get("fields") or {})
-        return jsonify(success=True, **result)
+        return jsonify(success=True, **create_monday_record(payload.get('itemName'), payload.get('fields') or {}))
     except MondayError as exc:
         return jsonify(error=str(exc)), exc.status
 
-# monday.com crm portion end
+
+@app.get('/')
+def index():
+    if not (ROOT / 'dist/index.html').exists():
+        return jsonify(error='Build the interface with pnpm build.'), 503
+    return send_from_directory(ROOT / 'dist', 'index.html')
 
 
-@app.get("/")
-def serve_ui():
-    if not (DIST_DIR / "index.html").exists():
-        return jsonify(error="UI is not built. Run 'pnpm build' first."), 503
-    return send_from_directory(DIST_DIR, "index.html")
+@app.get('/<path:asset>')
+def asset(asset):
+    return send_from_directory(ROOT / 'dist', asset)
 
 
-@app.get("/<path:asset_path>")
-def serve_ui_asset(asset_path: str):
-    candidate = DIST_DIR / asset_path
-    if candidate.is_file():
-        return send_from_directory(DIST_DIR, asset_path)
-    return send_from_directory(DIST_DIR, "index.html")
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("SCANNER_API_PORT", "5000")))
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=5000, threaded=True, debug=False)
