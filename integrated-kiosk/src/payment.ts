@@ -4,7 +4,7 @@ export const PAYMENT_AMOUNT = 11425;
 export const PAYMENT_LABEL = "$114.25";
 export interface TerminalSettings { enabled: boolean; simulated: boolean; location: string | null; problem: string }
 export interface PaymentConfig { publishableKey: string; amount: number; currency: string; testMode: boolean; terminal?: TerminalSettings }
-export interface PaymentResult { id: string; status: string; amount: number; testMode: boolean; client_secret?: string; method?: string }
+export interface PaymentResult { id: string; status: string; amount: number; testMode: boolean; client_secret?: string; method?: string; receiptEmail?: string | null }
 export interface CardEntry {
   pay: (payload: Record<string, string>, onStatus: (text: string) => void) => Promise<PaymentResult>;
   destroy: () => void;

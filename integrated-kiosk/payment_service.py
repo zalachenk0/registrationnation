@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -35,6 +36,15 @@ def _client():
     stripe.api_key = key
     stripe.max_network_retries = 1
     stripe.default_http_client = stripe.RequestsClient(timeout=20)
+
+
+# a simple sanity check, not a full email validator. Anything that fails it is just not used for a receipt
+EMAIL = re.compile(r'[^@\s,;<>()\[\]\\"]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+
+
+def clean_email(value):
+    email = value.strip() if isinstance(value, str) else ''
+    return email if len(email) <= 254 and EMAIL.fullmatch(email) else None
 
 
 # S700 reader settings from .env. This never raises, so a typo here can't break the typed-card backup
@@ -102,6 +112,21 @@ class PaymentService:
         intent = stripe.PaymentIntent.retrieve(row['intent_id'])
         return self._check(intent, row['reference'], row['fingerprint'])
 
+    # Stripe emails its receipt when a payment is captured, to the email that is on the payment at that moment.
+    # Setting it here, not when the payment is created, means the email the customer ended up with is the one used,
+    # and a changed email can never clash with Stripe's duplicate-request protection.
+    # Best effort on purpose: a receipt problem must never stop a payment that was approved
+    @staticmethod
+    def _set_receipt_email(intent, payload):
+        email = clean_email(payload.get('receipt_email')) if isinstance(payload, dict) else None
+        if not email or intent.get('receipt_email') == email:
+            return
+        try:
+            stripe.PaymentIntent.modify(intent.id, receipt_email=email,
+                                        idempotency_key='kiosk-receipt-' + intent.id + '-' + hashlib.sha256(email.encode()).hexdigest()[:12])
+        except stripe.StripeError:
+            pass
+
     @staticmethod
     def _method(intent):
         return 'terminal' if 'card_present' in (intent.payment_method_types or []) else 'card'
@@ -116,6 +141,7 @@ class PaymentService:
     def _result(intent):
         return dict(id=intent.id, client_secret=intent.client_secret, status=intent.status,
                     amount=intent.amount, testMode=not intent.livemode, method=PaymentService._method(intent),
+                    receiptEmail=intent.get('receipt_email'),
                     paymentIntent=dict(intent) if intent.status == 'requires_confirmation' else None)
 
     def create_payment_intent(self, payload, mode='card'):
@@ -176,6 +202,7 @@ class PaymentService:
                     raise PaymentError('The form has changed since payment started. Restore the original information.')
                 intent = self._retrieve(row)
                 if intent.status == 'requires_capture':
+                    self._set_receipt_email(intent, payload)
                     intent = stripe.PaymentIntent.capture(intent.id, idempotency_key='kiosk-capture-' + intent.id)
                 self._check(intent, reference, fingerprint)
                 if intent.status != 'succeeded' or intent.amount_received != AMOUNT_CENTS:

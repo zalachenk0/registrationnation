@@ -19,10 +19,12 @@ class FakeStripe:
     def __init__(self, monkeypatch):
         self.intents, self.by_key = {}, {}
         self.created, self.canceled, self.captured = [], [], []
+        self.modified, self.events, self.modify_error = [], [], None
         monkeypatch.setattr(stripe.PaymentIntent, 'create', self.create)
         monkeypatch.setattr(stripe.PaymentIntent, 'retrieve', lambda iid, **kw: self.intents[iid])
         monkeypatch.setattr(stripe.PaymentIntent, 'cancel', self.cancel)
         monkeypatch.setattr(stripe.PaymentIntent, 'capture', self.capture)
+        monkeypatch.setattr(stripe.PaymentIntent, 'modify', self.modify)
 
     def create(self, **kw):
         self.created.append(kw)
@@ -42,7 +44,17 @@ class FakeStripe:
         self.intents[iid].status = 'canceled'
         return self.intents[iid]
 
+    def modify(self, iid, **kw):
+        self.events.append('modify')
+        self.modified.append((iid, kw))
+        if self.modify_error:
+            raise self.modify_error
+        if 'receipt_email' in kw:
+            self.intents[iid]['receipt_email'] = kw['receipt_email']
+        return self.intents[iid]
+
     def capture(self, iid, **kw):
+        self.events.append('capture')
         self.captured.append(iid)
         self.intents[iid].status = 'succeeded'
         self.intents[iid].amount_received = self.intents[iid].amount
@@ -241,3 +253,89 @@ def test_create_intent_route_passes_the_payment_mode(env):
     assert client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='card'), headers=HEADERS).json['method'] == 'card'
     assert client.post('/api/payment/create_intent', json=FORM, headers=HEADERS).json['method'] == 'card'   # default stays typed card
     assert len(fake.created) == 2 and fake.canceled == ['pi_fake_1']          # terminal -> card swapped; the last call just resumed
+
+
+# ---------- receipt email ----------
+
+EMAILS = ['jane.sample@example.com', 'a@b.co']
+
+
+@pytest.mark.parametrize('mode', ['terminal', 'card'])
+def test_receipt_email_is_set_just_before_capture_for_reader_and_typed_card(env, mode):
+    payments, fake = env
+    intent = payments.create_payment_intent(FORM, mode=mode)
+    fake.authorize(intent['id'])
+    result = payments.capture_payment_intent(dict(FORM, receipt_email='  Jane.Sample@Example.com '))
+    assert fake.events == ['modify', 'capture']                              # email first, then the money, in that order
+    assert fake.modified[0][0] == intent['id'] and fake.modified[0][1]['receipt_email'] == 'Jane.Sample@Example.com'   # trimmed
+    assert result['receiptEmail'] == 'Jane.Sample@Example.com' and result['status'] == 'succeeded'
+
+
+def test_the_email_is_not_sent_when_the_payment_is_created(env):
+    payments, fake = env
+    payments.create_payment_intent(dict(FORM, receipt_email='jane.sample@example.com'), mode='terminal')
+    assert 'receipt_email' not in fake.created[0]                            # so a changed email can never clash with Stripe's duplicate protection
+
+
+@pytest.mark.parametrize('bad', [None, '', 'not-an-email', 'two@@example.com', 'sp ace@example.com', 'x@example', 123])
+def test_a_missing_or_bad_email_never_blocks_the_payment(env, bad):
+    payments, fake = env
+    intent = payments.create_payment_intent(FORM, mode='terminal')
+    fake.authorize(intent['id'])
+    result = payments.capture_payment_intent(dict(FORM, receipt_email=bad) if bad is not None else FORM)
+    assert result['status'] == 'succeeded' and result['receiptEmail'] is None
+    assert fake.events == ['capture']                                        # no attempt to attach a bad address
+
+
+def test_a_stripe_problem_while_attaching_the_email_never_blocks_the_payment(env):
+    payments, fake = env
+    intent = payments.create_payment_intent(FORM, mode='card')
+    fake.authorize(intent['id'])
+    fake.modify_error = stripe.APIConnectionError('lost')
+    result = payments.capture_payment_intent(dict(FORM, receipt_email=EMAILS[0]))
+    assert result['status'] == 'succeeded' and fake.captured == [intent['id']]   # the customer is still charged exactly once
+    assert result['receiptEmail'] is None                                       # and the screen will say no receipt could be set up
+
+
+def test_an_email_changed_after_the_first_attempt_is_the_one_used(env):
+    payments, fake = env
+    intent = payments.create_payment_intent(dict(FORM, receipt_email='old@example.com'), mode='terminal')
+    fake.intents[intent['id']]['receipt_email'] = 'old@example.com'          # an earlier attempt had set the old address
+    fake.authorize(intent['id'])
+    payments.capture_payment_intent(dict(FORM, receipt_email='new@example.com'))
+    assert fake.modified[0][1]['receipt_email'] == 'new@example.com'
+
+
+def test_no_update_when_stripe_already_has_the_same_email(env):
+    payments, fake = env
+    intent = payments.create_payment_intent(FORM, mode='terminal')
+    fake.intents[intent['id']]['receipt_email'] = EMAILS[0]
+    fake.authorize(intent['id'])
+    payments.capture_payment_intent(dict(FORM, receipt_email=EMAILS[0]))
+    assert fake.modified == [] and fake.events == ['capture']
+
+
+def test_an_already_paid_payment_is_not_touched_again(env):
+    payments, fake = env
+    intent = payments.create_payment_intent(FORM, mode='terminal')
+    fake.authorize(intent['id'])
+    payments.capture_payment_intent(dict(FORM, receipt_email=EMAILS[0]))
+    again = payments.capture_payment_intent(dict(FORM, receipt_email='other@example.com'))    # e.g. the print retry
+    assert fake.events == ['modify', 'capture'] and again['status'] == 'succeeded' and again['receiptEmail'] == EMAILS[0]
+
+
+def test_editing_the_email_never_trips_the_form_changed_check_and_printing_still_works(env):
+    payments, fake = env
+    intent = payments.create_payment_intent(dict(FORM, receipt_email='one@example.com'), mode='terminal')
+    fake.authorize(intent['id'])
+    payments.capture_payment_intent(dict(FORM, receipt_email='two@example.com'))        # a different email than at creation: fine
+    assert payments.verify_paid(dict(FORM, receipt_email='three@example.com'))['id'] == intent['id']
+
+
+def test_the_capture_route_passes_the_email_through(env):
+    payments, fake = env
+    client = api.app.test_client()
+    intent = client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='terminal'), headers=HEADERS).json
+    fake.authorize(intent['id'])
+    reply = client.post('/api/payment/capture_intent', json=dict(FORM, receipt_email=EMAILS[0]), headers=HEADERS)
+    assert reply.status_code == 200 and reply.json['receiptEmail'] == EMAILS[0] and fake.events == ['modify', 'capture']

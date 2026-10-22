@@ -1107,7 +1107,8 @@ export default function App() {
       const payload = { registrant: `${personal.firstName} ${personal.lastName}`,
         license_plate: license.licensePlate, vehicle_year: license.vehicleYear,
         vehicle_make: license.vehicleMake, vehicle_model: license.vehicleModel,
-        vin: license.vin, confirmation_number: printReference.current };
+        vin: license.vin, confirmation_number: printReference.current,
+        receipt_email: personal.email.trim() };  // Stripe emails its receipt to this when the payment is captured
       if (!paid && !cardEntry.current) throw new Error("Wait for the card reader or card form to finish loading, then retry.");
       confirmed = paid || await cardEntry.current!.pay(payload, setPaymentStatus);
       if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
@@ -1228,18 +1229,26 @@ export default function App() {
               <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
                 Your $114.25 Stripe test payment succeeded and the mock sticker and receipt were accepted by the print queue. No real money was charged. Check the printer to collect them.
               </p>
-              {personal.email && (
+              {paid?.receiptEmail ? (
                 <p className="text-xs mt-1 flex items-center justify-center gap-1.5" style={{ color: "var(--muted-foreground)" }}>
                   <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0 }}>
                     <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
                     <path d="M1.5 3.5l5 3.5 5-3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  Contact email (no receipt email is sent): <strong className="ml-0.5">{personal.email}</strong>
+                  Stripe will email a receipt to <strong className="ml-0.5">{paid.receiptEmail}</strong>
+                </p>
+              ) : personal.email ? (
+                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+                  No receipt email could be set up for <strong>{personal.email}</strong>. Check the address on the Review step.
+                </p>
+              ) : (
+                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+                  No email address was entered, so no receipt email is sent.
                 </p>
               )}
-              {!personal.email && (
-                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-                  No receipt email is sent by this local demonstration.
+              {paid?.receiptEmail && (
+                <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+                  In Stripe test mode, receipts are only delivered to the Stripe account owner's own email address.
                 </p>
               )}
             </div>
@@ -1256,6 +1265,7 @@ export default function App() {
                   { label: "Plate", value: license.licensePlate },
                   { label: "Amount Paid", value: "$114.25 (Stripe test)" },
                   { label: "Stripe Payment", value: paid?.id || "—" },
+                  { label: "Receipt email", value: paid?.receiptEmail || "Not sent" },
                   { label: "Confirmation #", value: confNum },
                 ].map((r) => (
                   <div key={r.label} className="flex justify-between items-center py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
