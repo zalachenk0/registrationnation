@@ -18,6 +18,7 @@ from kiosk_scanners.results import ScannerError
 from printing import PrintService, PrintError, create_pdf, printer_status
 from payment_service import PaymentService, PaymentError, configuration, create_connection_token
 from monday_service import MondayError, create_monday_record
+from receipt_email import ReceiptMailer, MailError, MailNotConfigured
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env')
@@ -27,6 +28,7 @@ app.config['TRUSTED_HOSTS'] = ['localhost', '127.0.0.1', '[::1]']
 camera = Camera()
 printer = PrintService()
 payments = PaymentService()
+mailer = ReceiptMailer()
 scan_lock = threading.Lock()
 atexit.register(camera.close)
 
@@ -127,6 +129,22 @@ def print_registration():
         return jsonify(error=str(exc)), 422
     except PrintError as exc:
         return jsonify(error=str(exc)), 503
+
+
+# Emails the customer the TTT receipt (page 2, no signature block). Under /api/payment/ so it needs the same kiosk header,
+# and verify_paid means no confirmed payment, no email. Never blocks printing: the screen just reports what happened
+@app.post('/api/payment/email_receipt')
+def payment_email_receipt():
+    try:
+        payload = request.get_json(silent=True)
+        paid = payments.verify_paid(payload)
+        return jsonify(success=True, **mailer.send(payload, paid))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 422
+    except MailNotConfigured as exc:
+        return jsonify(error=str(exc), notConfigured=True), 503
+    except MailError as exc:
+        return jsonify(error=str(exc)), 502
 
 
 @app.errorhandler(PaymentError)

@@ -23,8 +23,9 @@ Reader and location IDs are unused. Camera/printer settings can stay as they are
 Local validation: 43 Python tests, 13 JavaScript/React tests, TypeScript check,
 production build, and a browser flow with simulated Stripe/printing. No real
 Stripe account, Pi camera, or physical printer was tested here. The supplied
-sticker is a demonstration mockup, not official registration; no receipt email
-is sent. Existing staff login is a prototype UI gate, not production authentication.
+sticker is a demonstration mockup, not official registration. Stripe emails a
+receipt to the customer's email when the payment is captured (in test mode only to the
+Stripe account owner's address). Existing staff login is a prototype UI gate, not production authentication.
 
 Development only:
 

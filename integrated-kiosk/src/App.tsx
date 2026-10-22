@@ -5,6 +5,7 @@ import { getPaymentConfig, PAYMENT_AMOUNT, type CardEntry, type PaymentResult } 
 import { CardPayment } from "./CardPayment";
 import { TerminalPayment } from "./TerminalPayment";
 import { createMondayRecord } from "./monday";
+import { emailReceipt } from "./receiptEmail";
 import { CompletionTimer } from "./CompletionTimer";
 import { renewalError } from "./renewal";
 
@@ -1011,6 +1012,13 @@ export default function App() {
   const crmSavedRef = useRef(false);  // so a print retry can never make a second crm record
   const crmPayloadRef = useRef<{ itemName: string; fields: Record<string, string | number> } | null>(null);  // kept so the retry button can resend it
 
+  // the texas tag & title receipt pdf we email to the customer, shown on the success screen next to the crm row
+  const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
+  const [emailMessage, setEmailMessage] = useState("");
+  const emailSentRef = useRef(false);   // so a print retry can't start a second email (the server also sends only one per payment)
+  const emailBusyRef = useRef(false);   // so a double click on retry can't run two at once
+  const emailPayloadRef = useRef<Record<string, string> | null>(null);  // kept so the retry button can resend it
+
   const [personal, setPersonal] = useState<PersonalInfo>({
     firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "",
     address: "", city: "", state: "", zip: "",
@@ -1114,6 +1122,7 @@ export default function App() {
       if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
       setPaid(confirmed);
       setPaymentStatus("Test payment confirmed. Sending to printer…");
+      void sendReceiptEmail(payload);   // emailed as soon as the payment is confirmed, so it goes out even if the printer is down
       await submitPrint(payload);
       setSubmitted(true);
 
@@ -1126,6 +1135,25 @@ export default function App() {
     } finally {
       printPending.current = false;
       setPrinting(false);
+    }
+  };
+
+  // emails the receipt pdf. runs in the background and never blocks payment or printing
+  const sendReceiptEmail = async (payload: Record<string, string>) => {
+    if (emailBusyRef.current || emailSentRef.current) return;
+    emailBusyRef.current = true;
+    emailPayloadRef.current = payload;
+    setEmailStatus("sending");
+    setEmailMessage("");
+    const result = await emailReceipt(payload);
+    emailBusyRef.current = false;
+    if (result.success) {
+      emailSentRef.current = true;
+      setEmailStatus("sent");
+      setEmailMessage(result.to);
+    } else {
+      setEmailStatus("failed");
+      setEmailMessage(result.error);
     }
   };
 
@@ -1235,7 +1263,7 @@ export default function App() {
                     <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
                     <path d="M1.5 3.5l5 3.5 5-3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  Stripe will email a receipt to <strong className="ml-0.5">{paid.receiptEmail}</strong>
+                  Stripe will also email its own payment receipt to <strong className="ml-0.5">{paid.receiptEmail}</strong>
                 </p>
               ) : personal.email ? (
                 <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
@@ -1265,7 +1293,7 @@ export default function App() {
                   { label: "Plate", value: license.licensePlate },
                   { label: "Amount Paid", value: "$114.25 (Stripe test)" },
                   { label: "Stripe Payment", value: paid?.id || "—" },
-                  { label: "Receipt email", value: paid?.receiptEmail || "Not sent" },
+                  { label: "Stripe receipt email", value: paid?.receiptEmail || "Not sent" },
                   { label: "Confirmation #", value: confNum },
                 ].map((r) => (
                   <div key={r.label} className="flex justify-between items-center py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -1277,6 +1305,24 @@ export default function App() {
             </div>
 
             {/* monday.com crm status */}
+            {emailStatus !== "idle" && (
+              <div className="w-full flex flex-col gap-2">
+                <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
+                  <span style={{ color: "var(--muted-foreground)" }}>Receipt PDF by email</span>
+                  <span className="font-semibold" style={{ color: emailStatus === "sent" ? "#3a7d44" : emailStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>
+                    {emailStatus === "sending" ? "Sending..." : emailStatus === "sent" ? "Sent ✓" : "Not sent"}
+                  </span>
+                </div>
+                {emailStatus === "sent" && <p className="text-xs px-1" style={{ color: "var(--muted-foreground)" }}>Emailed to {emailMessage}</p>}
+                {emailStatus === "failed" && <p className="text-xs px-1" style={{ color: "#b42318" }}>{emailMessage}</p>}
+                {emailStatus === "failed" && (
+                  <button type="button" onClick={() => { if (emailPayloadRef.current) void sendReceiptEmail(emailPayloadRef.current); }} className="self-start px-4 py-2 rounded-md text-xs font-semibold" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>
+                    Retry sending receipt
+                  </button>
+                )}
+              </div>
+            )}
+
             {crmStatus !== "idle" && (
               <div className="w-full flex flex-col gap-2">
                 <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
@@ -1294,7 +1340,7 @@ export default function App() {
               </div>
             )}
 
-            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />
+            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; setEmailStatus("idle"); setEmailMessage(""); emailSentRef.current = false; emailBusyRef.current = false; emailPayloadRef.current = null; }} />
           </div>
         </div>
       </div>

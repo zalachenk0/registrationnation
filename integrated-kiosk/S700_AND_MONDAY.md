@@ -22,6 +22,47 @@ the typed-card version.
 A mistyped `STRIPE_LOCATION_ID` never breaks payment: the reader is turned off, the typed card
 still works, and the screen says why.
 
+## Receipt email
+
+The email the customer typed is given to Stripe just before their payment is captured, and Stripe emails its receipt
+at that moment. This works the same for the S700 reader and the typed card. The success screen shows
+"Stripe will email a receipt to ..." and a "Receipt email" row. If the address doesn't look valid, or Stripe can't
+attach it, the payment still completes and the screen says no receipt email could be set up.
+
+**Test mode:** Stripe does not send receipts automatically for payments made with test keys, except when the email belongs to
+the Stripe account owner or a verified team member. To test real delivery, type your own Stripe account email into the kiosk.
+For any other address, open the payment in the Stripe Dashboard and click **Send receipt** (Receipt history section).
+
+## Emailed Texas Tag & Title receipt
+
+After a payment is confirmed, the kiosk emails the customer the Texas Tag & Title receipt: page 2 of the print-out, as a one-page
+PDF **without the signature block** (nobody can sign an email). This is separate from Stripe's own receipt email above.
+
+- It goes out as soon as the payment is confirmed, so it is sent even if the printer is down.
+- One email per payment. A retry or double click can never send it twice.
+- A mail problem never blocks a payment or a print. The success screen shows **Receipt PDF by email: Sent / Not sent**, and a
+  **Retry sending receipt** button when it failed.
+- Only a payment Stripe has confirmed can trigger an email. The kiosk stores only a fingerprint of the address, not the address.
+
+**Set it up (one time per kiosk):**
+
+1. In `.env`, set `SMTP_USERNAME` (already `registrationnation@texastagandtitle.com` in `.env.example`) and `SMTP_PASSWORD`.
+   An existing `.env` does not get new lines automatically, so add them by hand. **Never share or commit the password.**
+2. For a Google account the password must be an **App Password**, not the normal password. Turn on 2-Step Verification for the account,
+   then create an App Password at `myaccount.google.com/apppasswords`. Google shows it as four groups of four letters. Paste it as shown, spaces are fine.
+3. Check the login without sending anything: `python3 receipt_email.py check`
+   (Windows: `.\.venv\Scripts\python.exe receipt_email.py check`).
+4. Send yourself a sample TEST receipt: `python3 receipt_email.py test you@example.com`. Check the inbox and the spam folder.
+
+**If Google rejects the login.** A custom-domain address such as `@texastagandtitle.com` is usually Google Workspace, and Google
+Workspace may not allow App Passwords. If the App Passwords page does not appear, or the check says the username or password
+was rejected, ask whoever administers the Workspace, or use a different email service. Nothing in the code changes. Set
+`SMTP_HOST`, `SMTP_PORT` (587, or 465 for a secure connection from the start), `SMTP_USERNAME`, `SMTP_PASSWORD`, and `RECEIPT_FROM`
+if the sending address differs from the login. `RECEIPT_FROM` must be an address the login is allowed to send as.
+
+Gmail limits how many emails an account can send per day (roughly 500 for a personal account and 2,000 for Workspace).
+That is plenty for a kiosk.
+
 ## Setting up the real S700 (one time)
 
 1. In the Stripe Dashboard (test mode) create a **Location** (Terminal > Locations) and copy its id (`tml_...`).
