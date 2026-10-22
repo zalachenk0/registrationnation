@@ -1006,11 +1006,8 @@ export default function App() {
     return () => { active = false; };
   }, []);
 
-  // monday.com crm record, shown on the success screen
-  const [crmStatus, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
-  const [crmMessage, setCrmMessage] = useState("");
-  const crmSavedRef = useRef(false);  // so a print retry can never make a second crm record
-  const crmPayloadRef = useRef<{ itemName: string; fields: Record<string, string | number> } | null>(null);  // kept so the retry button can resend it
+  // monday.com crm record. This is a back-office matter, so nothing about it is ever shown to the customer
+  const crmStartedRef = useRef("");  // the reference whose crm save has been started, so a print retry can never make a second record
 
   // the texas tag & title receipt pdf we email to the customer, shown on the success screen next to the crm row
   const [emailStatus, setEmailStatus] = useState<"idle" | "sending" | "sent" | "failed">("idle");
@@ -1086,19 +1083,14 @@ export default function App() {
     };
   };
 
-  // sends the record to monday.com and updates the status shown on the success screen
+  // saves the finished renewal to monday.com. Nothing is shown to the customer: it's for the office.
+  // Monday being briefly unreachable is the usual problem, so a failure is retried a few times in the background
+  // (this keeps going even after the screen resets for the next customer). Anything that never goes through
+  // is written to runtime/kiosk-problems.log by the server, so the office can see it.
   const saveToCrm = async (payload: { itemName: string; fields: Record<string, string | number> }) => {
-    crmPayloadRef.current = payload;
-    setCrmStatus("saving");
-    setCrmMessage("");
-    const result = await createMondayRecord(payload.itemName, payload.fields);
-    if (result.success) {
-      crmSavedRef.current = true;
-      setCrmStatus("saved");
-      setCrmMessage(result.warnings.length ? `Saved, but skipped: ${result.warnings.join("; ")}` : "");
-    } else {
-      setCrmStatus("failed");
-      setCrmMessage(result.error);
+    for (const waitMs of [0, 5000, 15000, 45000]) {
+      if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      if ((await createMondayRecord(payload.itemName, payload.fields)).success) return;
     }
   };
 
@@ -1126,8 +1118,11 @@ export default function App() {
       await submitPrint(payload);
       setSubmitted(true);
 
-      // log the finished renewal to monday.com. runs in the background so the customer never waits on it
-      if (!crmSavedRef.current) void saveToCrm(buildCrmPayload(payload.confirmation_number, confirmed.id));
+      // log the finished renewal to monday.com in the background. nothing about it is shown to the customer
+      if (crmStartedRef.current !== payload.confirmation_number) {
+        crmStartedRef.current = payload.confirmation_number;
+        void saveToCrm(buildCrmPayload(payload.confirmation_number, confirmed.id));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Payment or printing failed. Your form is still available.";
       setPaymentStatus(confirmed ? "Test payment confirmed. Retry printing without paying again." : "Payment not confirmed. Retry to check the same transaction.");
@@ -1151,6 +1146,8 @@ export default function App() {
       emailSentRef.current = true;
       setEmailStatus("sent");
       setEmailMessage(result.to);
+    } else if (result.notConfigured) {
+      setEmailStatus("idle");   // email isn't set up on this kiosk yet: that's for the office (it's in the log), so the customer sees nothing
     } else {
       setEmailStatus("failed");
       setEmailMessage(result.error);
@@ -1304,7 +1301,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* monday.com crm status */}
+            {/* receipt email status */}
             {emailStatus !== "idle" && (
               <div className="w-full flex flex-col gap-2">
                 <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
@@ -1314,7 +1311,7 @@ export default function App() {
                   </span>
                 </div>
                 {emailStatus === "sent" && <p className="text-xs px-1" style={{ color: "var(--muted-foreground)" }}>Emailed to {emailMessage}</p>}
-                {emailStatus === "failed" && <p className="text-xs px-1" style={{ color: "#b42318" }}>{emailMessage}</p>}
+                {emailStatus === "failed" && <p className="text-xs px-1" style={{ color: "var(--muted-foreground)" }}>We couldn't email your receipt just now. Your printed receipt is complete, and the office can resend it.</p>}
                 {emailStatus === "failed" && (
                   <button type="button" onClick={() => { if (emailPayloadRef.current) void sendReceiptEmail(emailPayloadRef.current); }} className="self-start px-4 py-2 rounded-md text-xs font-semibold" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>
                     Retry sending receipt
@@ -1323,24 +1320,7 @@ export default function App() {
               </div>
             )}
 
-            {crmStatus !== "idle" && (
-              <div className="w-full flex flex-col gap-2">
-                <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
-                  <span style={{ color: "var(--muted-foreground)" }}>CRM record (Monday.com)</span>
-                  <span className="font-semibold" style={{ color: crmStatus === "saved" ? "#3a7d44" : crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>
-                    {crmStatus === "saving" ? "Saving..." : crmStatus === "saved" ? "Saved ✓" : "Not saved"}
-                  </span>
-                </div>
-                {crmMessage && <p className="text-xs px-1" style={{ color: crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>{crmMessage}</p>}
-                {crmStatus === "failed" && (
-                  <button type="button" onClick={() => { if (crmPayloadRef.current) void saveToCrm(crmPayloadRef.current); }} className="self-start px-4 py-2 rounded-md text-xs font-semibold" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>
-                    Retry saving to CRM
-                  </button>
-                )}
-              </div>
-            )}
-
-            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; setEmailStatus("idle"); setEmailMessage(""); emailSentRef.current = false; emailBusyRef.current = false; emailPayloadRef.current = null; }} />
+            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); crmStartedRef.current = ""; setEmailStatus("idle"); setEmailMessage(""); emailSentRef.current = false; emailBusyRef.current = false; emailPayloadRef.current = null; }} />
           </div>
         </div>
       </div>

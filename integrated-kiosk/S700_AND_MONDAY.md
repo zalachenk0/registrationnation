@@ -4,8 +4,9 @@
 
 1. **The Stripe S700 card reader is the primary way to pay.** The typed-card form is the backup:
    on the payment screen, "Reader not working? Enter the card manually instead".
-2. **Every finished renewal is saved to the Monday.com CRM board** (one new row, shown on the
-   success screen as "CRM record (Monday.com): Saved ✓", with a Retry button if Monday is down).
+2. **Every finished renewal is saved to the Monday.com CRM board** (one new row). This happens quietly in the
+   background: the customer's screen never mentions it. If Monday is briefly down, the kiosk retries by itself
+   a few times. Anything that never goes through is written to `runtime/kiosk-problems.log` for the office (see below).
 
 Nothing else about the form changes. With no reader configured, the kiosk behaves exactly like
 the typed-card version.
@@ -26,12 +27,31 @@ still works, and the screen says why.
 
 The email the customer typed is given to Stripe just before their payment is captured, and Stripe emails its receipt
 at that moment. This works the same for the S700 reader and the typed card. The success screen shows
-"Stripe will email a receipt to ..." and a "Receipt email" row. If the address doesn't look valid, or Stripe can't
+"Stripe will also email its own payment receipt to ..." and a "Stripe receipt email" row. If the address doesn't look valid, or Stripe can't
 attach it, the payment still completes and the screen says no receipt email could be set up.
 
 **Test mode:** Stripe does not send receipts automatically for payments made with test keys, except when the email belongs to
 the Stripe account owner or a verified team member. To test real delivery, type your own Stripe account email into the kiosk.
 For any other address, open the payment in the Stripe Dashboard and click **Send receipt** (Receipt history section).
+
+## The office problem log
+
+The customer never sees backend problems, so anything that goes wrong with Monday or the emailed receipt is written, one line each,
+to **`runtime/kiosk-problems.log`** (in the app folder, on the kiosk). Look at it if a record is missing from the Monday board or a customer says
+they got no receipt email:
+
+    2026-10-22 14:03:11  MONDAY NOT SAVED  Sample, Jane - KGP-4821 (payment pi_3...): Not Authenticated - check MONDAY_API_TOKEN
+    2026-10-22 14:05:40  RECEIPT EMAIL NOT SENT  REG-54B9F771-...: The email server rejected the username or password...
+
+- **MONDAY NOT SAVED**: the kiosk tried up to 4 times (right away, then after about 5, 15 and 45 seconds). Several lines for the same
+  customer mean it kept failing. If the row is on the board, a later try worked. If not, add the entry by hand. The line has the
+  customer's name and plate and the Stripe payment ID, so the payment can be found in Stripe.
+- **MONDAY SAVED, FIELDS SKIPPED**: the row was made but some columns were left out, usually a value Monday refused. The line says which.
+- **RECEIPT EMAIL NOT SENT**: the reason is spelled out (login rejected, no internet, address refused...). The customer can press
+  Retry on their screen, and `python3 receipt_email.py check` tests the login. The line has the transaction reference.
+
+The log holds names, plates and references, never passwords or email addresses. It lives in `runtime/` (not uploaded to GitHub). A normal day leaves
+it empty or missing. Delete the file any time to start fresh.
 
 ## Emailed Texas Tag & Title receipt
 
@@ -40,8 +60,11 @@ PDF **without the signature block** (nobody can sign an email). This is separate
 
 - It goes out as soon as the payment is confirmed, so it is sent even if the printer is down.
 - One email per payment. A retry or double click can never send it twice.
-- A mail problem never blocks a payment or a print. The success screen shows **Receipt PDF by email: Sent / Not sent**, and a
-  **Retry sending receipt** button when it failed.
+- A mail problem never blocks a payment or a print. The success screen shows **Receipt PDF by email: Sent / Not sent**.
+  When it failed the customer sees a plain message ("We couldn't email your receipt just now...") and a
+  **Retry sending receipt** button. The technical reason goes to `runtime/kiosk-problems.log`, not to the customer.
+- If receipt email has not been set up on the kiosk yet, the customer sees nothing about it at all, no row and no message.
+  The office log gets a line saying so, and everything else works normally.
 - Only a payment Stripe has confirmed can trigger an email. The kiosk stores only a fingerprint of the address, not the address.
 
 **Set it up (one time per kiosk):**
@@ -54,11 +77,31 @@ PDF **without the signature block** (nobody can sign an email). This is separate
    (Windows: `.\.venv\Scripts\python.exe receipt_email.py check`).
 4. Send yourself a sample TEST receipt: `python3 receipt_email.py test you@example.com`. Check the inbox and the spam folder.
 
-**If Google rejects the login.** A custom-domain address such as `@texastagandtitle.com` is usually Google Workspace, and Google
-Workspace may not allow App Passwords. If the App Passwords page does not appear, or the check says the username or password
-was rejected, ask whoever administers the Workspace, or use a different email service. Nothing in the code changes. Set
-`SMTP_HOST`, `SMTP_PORT` (587, or 465 for a secure connection from the start), `SMTP_USERNAME`, `SMTP_PASSWORD`, and `RECEIPT_FROM`
-if the sending address differs from the login. `RECEIPT_FROM` must be an address the login is allowed to send as.
+**If Google says "The setting you are looking for is not available for your account"** when you open the App Passwords page, there are
+four known causes. 2-Step Verification is not turned on for the account. It is turned on for security keys only. The account belongs to
+an organization (Google Workspace, which is what a custom-domain address like `@texastagandtitle.com` usually is). Or Advanced
+Protection is on. First check that 2-Step Verification is on (Google Account > Security) and try the page again. If it still
+says that, an App Password is not an option for this account (some sources say Workspace accounts can no longer use them at all),
+and the next step is a different sender. Nothing in the code changes. Only the `.env` values do.
+
+**Backup: Brevo (an email service with a free plan, 300 emails a day at the time of writing).**
+
+1. Sign up at brevo.com with `registrationnation@texastagandtitle.com`, so the verification emails arrive in a mailbox you can open.
+2. In Brevo, add `registrationnation@texastagandtitle.com` as a **sender**. Brevo emails a link to that address. Click it.
+3. In Brevo's SMTP settings, create an **SMTP key**. This is not the account password. Copy it.
+4. In the kiosk's `.env`, replace the SMTP lines with:
+
+       SMTP_HOST=smtp-relay.brevo.com
+       SMTP_PORT=587
+       SMTP_USERNAME=<the email address you signed up to Brevo with>
+       SMTP_PASSWORD=<the SMTP key>
+       RECEIPT_FROM=registrationnation@texastagandtitle.com
+
+5. `python3 receipt_email.py check`, then `python3 receipt_email.py test you@example.com`. Look in the spam folder too.
+
+Brevo can send before the company domain is set up, but then some mail providers may put the receipts in spam or drop them. For reliable
+delivery, ask whoever manages the DNS for `texastagandtitle.com` to add the SPF and DKIM records that Brevo's domain settings show.
+Check Brevo's own pages for the current settings. Other email services work the same way (host, port, username, password).
 
 Gmail limits how many emails an account can send per day (roughly 500 for a personal account and 2,000 for Workspace).
 That is plenty for a kiosk.
@@ -96,7 +139,7 @@ This is Stripe's documented setting for the Terminal JavaScript SDK, but it has 
 1. Put `MONDAY_API_TOKEN` and `MONDAY_BOARD_ID` (and `MONDAY_GROUP_ID=group_mm88283z` for the Kiosk Renewals group) in `.env`.
 2. `python3 monday_service.py columns` lists the board's columns. `python3 monday_service.py test` adds one `[TEST]` row (delete it afterward).
 3. The **Renewal Status** label `Completed at kiosk` must exist on the board, spelled exactly like that,
-   or every save is rejected and the success screen shows "Not saved".
+   or every save is rejected (and written to `runtime/kiosk-problems.log`).
 4. Only the fields listed in `COLUMN_MAP` (top of `monday_service.py`) are sent. Driver's license number, date of
    birth and the full VIN are never sent.
 

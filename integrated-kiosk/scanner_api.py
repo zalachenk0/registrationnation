@@ -3,6 +3,7 @@ import atexit
 import io
 import os
 import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,6 +30,18 @@ camera = Camera()
 printer = PrintService()
 payments = PaymentService()
 mailer = ReceiptMailer()
+PROBLEM_LOG = Path(os.getenv('KIOSK_PROBLEM_LOG') or ROOT / 'runtime' / 'kiosk-problems.log')
+
+
+def log_problem(kind, detail):
+    """One line per problem for whoever looks after the kiosk (the office). The customer never sees these details.
+    Never lets a logging problem get in the way of a customer."""
+    try:
+        PROBLEM_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with PROBLEM_LOG.open('a', encoding='utf-8') as log:
+            log.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {kind}  {' '.join(str(detail).split())[:500]}\n")
+    except OSError:
+        pass
 scan_lock = threading.Lock()
 atexit.register(camera.close)
 
@@ -135,15 +148,19 @@ def print_registration():
 # and verify_paid means no confirmed payment, no email. Never blocks printing: the screen just reports what happened
 @app.post('/api/payment/email_receipt')
 def payment_email_receipt():
+    payload = request.get_json(silent=True)
+    reference = payload.get('confirmation_number') if isinstance(payload, dict) else None
     try:
-        payload = request.get_json(silent=True)
         paid = payments.verify_paid(payload)
         return jsonify(success=True, **mailer.send(payload, paid))
     except ValueError as exc:
+        log_problem('RECEIPT EMAIL NOT SENT', f'{reference}: {exc}')
         return jsonify(error=str(exc)), 422
     except MailNotConfigured as exc:
+        log_problem('RECEIPT EMAIL NOT SENT', f'{reference}: {exc}')
         return jsonify(error=str(exc), notConfigured=True), 503
     except MailError as exc:
+        log_problem('RECEIPT EMAIL NOT SENT', f'{reference}: {exc}')
         return jsonify(error=str(exc)), 502
 
 
@@ -185,10 +202,16 @@ def payment_connection_token():
 @app.post('/api/monday/create_record')
 def monday_create_record():
     payload = request.get_json(silent=True) or {}
+    fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
+    who = f"{payload.get('itemName')} (payment {fields.get('paymentIntentId')})"      # enough for the office to find the customer
     try:
-        return jsonify(success=True, **create_monday_record(payload.get('itemName'), payload.get('fields') or {}))
+        result = create_monday_record(payload.get('itemName'), fields)
     except MondayError as exc:
+        log_problem('MONDAY NOT SAVED', f'{who}: {exc}')
         return jsonify(error=str(exc)), exc.status
+    if result.get('warnings'):
+        log_problem('MONDAY SAVED, FIELDS SKIPPED', f"{who}: {'; '.join(result['warnings'])}")
+    return jsonify(success=True, **result)
 
 
 @app.get('/')
