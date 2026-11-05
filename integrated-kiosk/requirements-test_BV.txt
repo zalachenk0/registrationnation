@@ -1,0 +1,10 @@
+# ============================================================================
+# File:         requirements-test_BV.txt
+# Written by:   BV (Blas Vargas)
+# What it does: Python packages for running the tests.
+# Team-written: Logic written by BV (Blas Vargas). Outside code is used only
+#               through the third-party sources listed below.
+# Third-party:  Every package listed in this file is third-party.
+# ============================================================================
+pytest>=8,<10
+pypdf>=5,<7

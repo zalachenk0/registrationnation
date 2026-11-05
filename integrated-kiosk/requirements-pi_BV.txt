@@ -1,0 +1,21 @@
+# ============================================================================
+# File:         requirements-pi_BV.txt
+# Written by:   BV (Blas Vargas)
+# What it does: Python packages for the kiosk Raspberry Pi.
+# Team-written: Logic written by BV (Blas Vargas). Outside code is used only
+#               through the third-party sources listed below.
+# Third-party:  Every package listed in this file is third-party.
+# ============================================================================
+# NumPy, OpenCV, Pillow, Picamera2 and libcamera come from apt on Raspberry Pi.
+# Avoid replacing the OS NumPy/OpenCV in this environment (camera ABI compatibility).
+Flask>=3.1,<4
+pytesseract>=0.3.13,<0.4
+zxing-cpp>=2.3,<4
+reportlab>=4.2,<5
+pypdf>=5,<7
+requests>=2.32,<3
+gunicorn>=23,<24
+stripe>=11,<12
+python-dotenv>=1,<2
+
+pyserial>=3.5,<4

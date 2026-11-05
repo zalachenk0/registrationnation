@@ -1,0 +1,10 @@
+# ============================================================================
+# File:         requirements-print-update_BV.txt
+# Written by:   BV (Blas Vargas)
+# What it does: Python packages the PDF printing code needs.
+# Team-written: Logic written by BV (Blas Vargas). Outside code is used only
+#               through the third-party sources listed below.
+# Third-party:  Every package listed in this file is third-party.
+# ============================================================================
+pypdf>=5,<7
+reportlab>=4.2,<5

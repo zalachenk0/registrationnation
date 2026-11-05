@@ -1,3 +1,12 @@
+/* ============================================================================
+ * File:         fonts.css
+ * Written by:   BV (Blas Vargas)
+ * What it does: Loads the two fonts used on the kiosk screens.
+ * Team-written: Logic written by BV (Blas Vargas). Outside code is used only
+ *               through the third-party sources listed below.
+ * Third-party:  DM Serif Display and Instrument Sans fonts (SIL Open Font
+ *               License; the license files are in this folder).
+ * ============================================================================ */
 @font-face {
   font-family: 'DM Serif Display';
   font-style: italic;
