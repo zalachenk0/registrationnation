@@ -37,11 +37,19 @@ from dotenv import load_dotenv  # [3RD PARTY: python-dotenv] reads the same .env
 from flask import Flask, jsonify, request, send_file  # [3RD PARTY: Flask]
 from PIL import Image, UnidentifiedImageError  # [3RD PARTY: Pillow] checks an upload really is a picture
 
-from crm_photos_CG import KEEP_SETTING, PhotoDesk, clean_reference  # [CG] same photo desk the kiosk uses
+from crm_photos_CG import KEEP_SETTING, PhotoDesk, clean_reference, log_problem  # [CG] same photo desk and office log the kiosk uses
 from monday_service_CG import MondayError, create_monday_record  # [CG] same Monday code the kiosk uses
 from payment_service_CG import PaymentError, PaymentService, configuration, create_connection_token, server_reader_settings, terminal_settings  # [CG]
 
 MAX_PHOTO_BYTES = 15 * 1024 * 1024
+
+
+def monday_who(payload, fields):  # same wording as monday_who() in scanner_api_BV_CG.py, so both logs read alike
+    reference = clean_reference(fields.get('confirmationNumber')) or 'no reference'
+    name = ' '.join(str(payload.get('itemName') or 'no name').split())[:80]
+    intent = fields.get('paymentIntentId')
+    paid = f', payment {intent}' if isinstance(intent, str) and intent.startswith('pi_') and len(intent) < 80 else ''
+    return f'renewal {reference} ({name}){paid}'
 
 
 def create_app(scratch=None):
@@ -160,12 +168,17 @@ def create_app(scratch=None):
     # ---- monday.com: the same route as the kiosk, photos are queued after the answer ----
     @app.post('/api/monday/create_record')
     def monday_create_record():
-        payload = request.get_json(silent=True) or {}
+        payload = request.get_json(silent=True)
+        payload = payload if isinstance(payload, dict) else {}
+        fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
         try:
             result = create_monday_record(payload.get('itemName'), payload.get('fields') or {})
-        except MondayError as exc:
+        except MondayError as exc:  # logged the same way as the kiosk, into runtime/home_test/kiosk-problems.log
+            log_problem('MONDAY NOT SAVED', f'{monday_who(payload, fields)}: {exc} Add this renewal to the board by hand.')
             return jsonify(error=str(exc)), exc.status
-        fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
+        if result.get('warnings'):
+            log_problem('MONDAY SAVED, FIELDS SKIPPED', f"{monday_who(payload, fields)}, item {result.get('itemId')}: "
+                        + '; '.join(str(w) for w in result['warnings']))
         photos.attach(fields.get('confirmationNumber'), result.get('itemId'))
         return jsonify(success=True, **result)
 

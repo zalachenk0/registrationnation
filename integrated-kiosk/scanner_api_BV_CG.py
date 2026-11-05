@@ -37,7 +37,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from kiosk_auth_BV import install_auth
 from delivery_service_BV import DeliveryService
-from crm_photos_CG import PhotoDesk  # [CG]
+from crm_photos_CG import PhotoDesk, clean_reference, log_problem  # [CG] log_problem writes the office's runtime/kiosk-problems.log
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env')
@@ -322,16 +322,32 @@ def payment_reader_simulate_tap():
         return jsonify(error=str(exc)), 422
 
 
+# [CG] who a Monday problem is about, for the office log: the renewal reference, the record name and the Stripe payment.
+# That is enough for staff to find the customer and add the record by hand. Nothing else from the form is written
+def monday_who(payload, fields):
+    reference = clean_reference(fields.get('confirmationNumber')) or 'no reference'
+    name = ' '.join(str(payload.get('itemName') or 'no name').split())[:80]
+    intent = fields.get('paymentIntentId')
+    paid = f', payment {intent}' if isinstance(intent, str) and intent.startswith('pi_') and len(intent) < 80 else ''
+    return f'renewal {reference} ({name}){paid}'
+
+
 # monday.com crm: the form calls this after a renewal is paid and printed. the real work is in monday_service_CG.py
 @app.post('/api/monday/create_record')
 def monday_create_record():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}  # a list or plain value used to crash this route
+    fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
     try:
         result = create_monday_record(payload.get('itemName'), payload.get('fields') or {})
     except MondayError as exc:
+        # [CG] the customer has already paid and walked away by now, so the office has to hear about it, not just the screen
+        log_problem('MONDAY NOT SAVED', f'{monday_who(payload, fields)}: {exc} Add this renewal to the board by hand.')
         return jsonify(error=str(exc)), exc.status
+    if result.get('warnings'):
+        log_problem('MONDAY SAVED, FIELDS SKIPPED', f"{monday_who(payload, fields)}, item {result.get('itemId')}: "
+                    + '; '.join(str(w) for w in result['warnings']))
     try:
-        fields = payload.get('fields') if isinstance(payload.get('fields'), dict) else {}
         photos.attach(fields.get('confirmationNumber'), result.get('itemId'))  # [CG] the photos upload in the background, after this answer
     except Exception:
         app.logger.warning('The photos could not be queued for the Monday record.')
