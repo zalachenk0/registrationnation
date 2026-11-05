@@ -1,0 +1,214 @@
+diff --git a/src/App_BV_CG.tsx b/src/App_BV_CG.tsx
+index d22702d..ebc4520 100644
+--- a/src/App_BV_CG.tsx
++++ b/src/App_BV_CG.tsx
+@@ -1,6 +1,6 @@
+ import { useState, useRef, useEffect } from "react";
+ import logoUrl from "./imports/RN_Logo.png";
+-import { fillBlank, requestScan, submitPrint, type ScanResult } from "./integration_BV";
++import { fillBlank, noticeFill, requestScan, submitPrint, type ScanKind, type ScanResult } from "./integration_BV";
+ import { getPaymentConfig, PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG";
+ import { CardPayment } from "./CardPayment_CG";
+ import { TerminalPayment } from "./TerminalPayment_CG";
+@@ -292,7 +292,7 @@ function CameraModal({
+   onCapture,
+   onClose,
+ }: {
+-  docType: "license" | "insurance";
++  docType: ScanKind;
+   onCapture: () => void;
+   onClose: () => void;
+ }) {
+@@ -334,7 +334,7 @@ function CameraModal({
+   const handleClose = onClose;
+ 
+   const [insuranceFormat, setInsuranceFormat] = useState<"paper" | "phone">("paper");
+-  const shape = docType === "license" ? "license" : insuranceFormat;
++  const shape = docType === "license" ? "license" : docType === "registration" ? "notice" : insuranceFormat;
+   const guides = {
+     license: {
+       title: "Position Your Driver’s License",
+@@ -350,6 +350,13 @@ function CameraModal({
+       detail: "Keep every edge visible",
+       tip: "Lay the page flat. Keep the text clear, with no folds, shadows or glare.",
+     },
++    notice: {
++      title: "Position Your Renewal Notice",
++      subtitle: "Lay your registration renewal notice sideways, top edge to the left.",
++      position: "Sideways · 8½ × 11 in notice", label: "Keep the whole page inside the frame",
++      detail: "Keep every edge visible",
++      tip: "Lay the notice flat. Keep the text clear, with no folds, shadows or glare.",
++    },
+     phone: {
+       title: "Position Your Insurance Screen",
+       subtitle: "Rotate your phone sideways and open your proof of insurance.",
+@@ -395,13 +402,13 @@ function CameraModal({
+         )}
+ 
+         <p className="text-xs uppercase tracking-widest text-center mt-1" style={{ color: "#bdc7d3" }}>{guide.position}</p>
+-        <div className="relative shrink-0" style={{ aspectRatio: "16/9", backgroundColor: "#090e15" }}>
++        <div className="relative shrink-0" style={{ aspectRatio: "4/3", backgroundColor: "#090e15" }}>
+           {camError || !frameUrl ? (
+             <div role="status" className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm" style={{ color: "#cbd4df" }}>
+-              {camError || "Starting the Pi camera…"}
++              {camError || "Starting the camera…"}
+             </div>
+           ) : (
+-            <img src={frameUrl} alt="Live Arducam preview" className="absolute inset-0 w-full h-full object-contain" />
++            <img src={frameUrl} alt="Live camera preview" className="absolute inset-0 w-full h-full object-contain" />
+           )}
+         </div>
+         <div className="text-center">
+@@ -439,7 +446,7 @@ function ScanPrompt({
+ }: {
+   title: string;
+   subtitle: string;
+-  docType: "license" | "insurance";
++  docType: ScanKind;
+   scanned: boolean;
+   onScan: (result: ScanResult) => void;
+   onManual?: () => void;
+@@ -824,6 +831,7 @@ function Step4({
+   onPersonalChange,
+   onLicenseChange,
+   onInsuranceChange,
++  onNoticeScan,
+ }: {
+   personal: PersonalInfo;
+   license: DriversLicense;
+@@ -831,7 +839,12 @@ function Step4({
+   onPersonalChange: (d: PersonalInfo) => void;
+   onLicenseChange: (d: DriversLicense) => void;
+   onInsuranceChange: (d: InsuranceInfo) => void;
++  onNoticeScan: (result: ScanResult) => void;
+ }) {
++  const blanks = [
++    personal.firstName, personal.lastName, personal.address, personal.city, personal.state, personal.zip,
++    license.licensePlate, license.vin, license.vehicleYear, license.vehicleMake, insurance.policyHolder,
++  ].filter(value => !value.trim()).length;
+   const sp = <K extends keyof PersonalInfo>(k: K) => (v: string) => onPersonalChange({ ...personal, [k]: v });
+   const sl = <K extends keyof DriversLicense>(k: K) => (v: string) => onLicenseChange({ ...license, [k]: v });
+   const si = <K extends keyof InsuranceInfo>(k: K) => (v: string) => onInsuranceChange({ ...insurance, [k]: v });
+@@ -846,6 +859,16 @@ function Step4({
+         <p className="text-xs" style={{ color: "#92400e" }}>Review carefully — hit <strong>Edit</strong> on any field to fix scanner errors before proceeding to payment.</p>
+       </div>
+ 
++      <ScanPrompt
++        title="Have your renewal notice? (optional)"
++        subtitle={blanks
++          ? "Scan the registration renewal notice to fill in the blank fields below. Nothing you already entered is changed."
++          : "Every notice field is already filled in. You can still scan the notice, but it only fills blank fields."}
++        docType="registration"
++        scanned={false}
++        onScan={onNoticeScan}
++      />
++
+       <EditableSection title="Personal Information">
+         <EditableRow label="First Name"    value={personal.firstName}   onChange={sp("firstName")} />
+         <EditableRow label="Last Name"     value={personal.lastName}    onChange={sp("lastName")} />
+@@ -1034,6 +1057,14 @@ export default function App() {
+     endDate: "", coverageType: "", agentName: "", agentPhone: "",
+   });
+ 
++  // Optional renewal notice: fills only fields that are still blank
++  const handleNoticeScan = (result: ScanResult) => {
++    const fill = noticeFill(result.fields);
++    setPersonal(current => fillBlank(current, { ...fill.personal, state: fill.personal.state ? stateName(fill.personal.state) : undefined }));
++    setLicense(current => fillBlank(current, fill.license));
++    setInsurance(current => fillBlank(current, fill.insurance));
++  };
++
+   const [printing, setPrinting] = useState(false);
+   const [paid, setPaid] = useState<PaymentResult | null>(null);
+   const [paymentStatus, setPaymentStatus] = useState("");
+@@ -1141,7 +1172,7 @@ export default function App() {
+     1: "Scan your driver's license — we'll fill in the rest. Just add your email and phone.",
+     2: "Confirm the driver's license details captured by the scanner.",
+     3: "Scan your proof of insurance to fill in your policy and vehicle information.",
+-    4: "Review all information before proceeding to payment.",
++    4: "Review all information before proceeding to payment. Have your renewal notice? Scan it to fill any blanks.",
+     5: "Complete your $114.25 renewal payment securely.",
+   };
+ 
+@@ -1333,7 +1364,7 @@ export default function App() {
+           {step === 1 && <Step1 data={personal} onChange={setPersonal} onLicenseScan={handleLicenseScan} licenseScanned={licensePrefilled} />}
+           {step === 2 && <Step2 data={license} onChange={setLicense} />}
+           {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicleData={license} onVehicleChange={setLicense} />}
+-          {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
++          {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} onNoticeScan={handleNoticeScan} />}
+           {step === 5 && paymentMode === null && <p role="status" className="text-sm">Checking payment options…</p>}
+         {step === 5 && paymentMode === "terminal" && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} onUseManual={() => { setPaymentStatus(""); setPaymentMode("card"); }} />}
+         {step === 5 && paymentMode === "card" && <CardPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} notice={readerProblem} onUseReader={readerAvailable ? () => { setPaymentStatus(""); setPaymentMode("terminal"); } : undefined} />}
+diff --git a/src/integration_BV.ts b/src/integration_BV.ts
+index c192e89..4905bc0 100644
+--- a/src/integration_BV.ts
++++ b/src/integration_BV.ts
+@@ -16,7 +16,9 @@ export function fillBlank<T extends object>(current: T, incoming: Partial<Record
+   return next;
+ }
+ 
+-export async function requestScan(kind: "license" | "insurance", signal: AbortSignal): Promise<ScanResult> {
++export type ScanKind = "license" | "insurance" | "registration";
++
++export async function requestScan(kind: ScanKind, signal: AbortSignal): Promise<ScanResult> {
+   const response = await fetch(`/api/camera/scan/${kind}`, { method: "POST", signal });
+   const result = await response.json();
+   if (!response.ok || !result.success || !result.fields || !Object.values(result.fields).some(value => typeof value === "string" && value.trim())) {
+@@ -25,6 +27,32 @@ export async function requestScan(kind: "license" | "insurance", signal: AbortSi
+   return result;
+ }
+ 
++const titleCase = (value: string) => value.toLowerCase().replace(/\b[a-z]/g, letter => letter.toUpperCase());
++
++/**
++ * Form values from an optional renewal notice scan (TxDMV VTR-39-A). The notice
++ * only fills blanks (callers use fillBlank), so a license or insurance value, or
++ * anything the customer typed, always wins. The first listed owner is used for
++ * names; the notice has no model (only a body style), so the model stays manual.
++ */
++export function noticeFill(f: Record<string, string>) {
++  const owner = (f.owner_names || "").split("/")[0].trim().split(/\s+/).filter(Boolean);
++  const vin = (f.vehicle_vin || "").toUpperCase();
++  return {
++    personal: {
++      firstName: owner.length > 1 ? titleCase(owner[0]) : undefined,
++      lastName: owner.length > 1 ? titleCase(owner[owner.length - 1]) : undefined,
++      address: f.owner_street, city: f.owner_city, state: f.owner_state,
++      zip: f.owner_zip ? f.owner_zip.slice(0, 5) : undefined,
++    },
++    license: {
++      licensePlate: f.license_plate, vehicleYear: f.vehicle_year, vehicleMake: f.vehicle_make,
++      vin: /^[A-HJ-NPR-Z0-9]{17}$/.test(vin) ? vin : undefined,
++    },
++    insurance: { policyHolder: owner.length > 1 ? titleCase(owner.join(" ")) : undefined },
++  };
++}
++
+ export async function submitPrint(payload: Record<string, string>): Promise<void> {
+   const controller = new AbortController();
+   const timeout = setTimeout(() => controller.abort(), 45000);
+diff --git a/tests/ui-integration_BV.test.mjs b/tests/ui-integration_BV.test.mjs
+index f4b8226..46d48a5 100644
+--- a/tests/ui-integration_BV.test.mjs
++++ b/tests/ui-integration_BV.test.mjs
+@@ -40,3 +40,20 @@ test('printing propagates errors and retries preserve the submitted reference',
+   await submitPrint(payload);
+   assert.deepEqual(bodies, [payload, payload]);
+ });
++
++test('renewal notice fills names, address, plate and vehicle, and rejects a partial VIN', async () => {
++  const { noticeFill } = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
++  const fill = noticeFill({
++    owner_names: 'ROBERT L LEIJA / PATRICIA GARCIA LEIJA', owner_street: '14222 PEBBLE GLADE',
++    owner_city: 'SAN ANTONIO', owner_state: 'TX', owner_zip: '78230-1234',
++    license_plate: 'GX52CL', vehicle_year: '2019', vehicle_make: 'Nissan', vehicle_vin: 'jn1ev7ek3km231838',
++  });
++  assert.deepEqual(fill.personal, { firstName: 'Robert', lastName: 'Leija', address: '14222 PEBBLE GLADE', city: 'SAN ANTONIO', state: 'TX', zip: '78230' });
++  assert.deepEqual(fill.license, { licensePlate: 'GX52CL', vehicleYear: '2019', vehicleMake: 'Nissan', vin: 'JN1EV7EK3KM231838' });
++  assert.equal(fill.insurance.policyHolder, 'Robert L Leija');
++  const partial = noticeFill({ owner_names: 'LEIJA', vehicle_vin: 'JN1EV7EK3KM2318' });
++  assert.equal(partial.license.vin, undefined);
++  assert.equal(partial.personal.firstName, undefined);
++  globalThis.fetch = async url => { assert.equal(url, '/api/camera/scan/registration'); return Response.json({ success: true, fields: { license_plate: 'GX52CL' } }); };
++  assert.equal((await requestScan('registration', new AbortController().signal)).fields.license_plate, 'GX52CL');
++});

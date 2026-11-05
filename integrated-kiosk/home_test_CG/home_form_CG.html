@@ -1,0 +1,391 @@
+<!doctype html>
+<!-- ============================================================================
+File:         home_form_CG.html
+Written by:   CG (Cristian Gonzalez)
+What it does: The page for the home test form: customer details, two stand-in
+              photos, test payment (card reader or typed card) and the save
+              to Monday.com. No scanning and no printing.
+Team-written: All logic and layout written by CG. The payment code follows
+              the same Stripe calls as the kiosk's src/payment_CG.ts and
+              src/terminal_CG.ts, plus the server-driven reader routes
+              (payment_service_CG.py), which follow Stripe's server-driven
+              Terminal guide.
+Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
+              (js.stripe.com/terminal/v1), loaded from Stripe's website.
+============================================================================ -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home test form (Registration Nation)</title>
+  <script src="https://js.stripe.com/v3/"></script> <!-- [3RD PARTY: Stripe.js] -->
+  <script src="https://js.stripe.com/terminal/v1/"></script> <!-- [3RD PARTY: Stripe Terminal JS SDK] -->
+  <style>
+    [hidden] { display: none !important; }  /* so a class that sets display (like .row) can never keep a hidden box on screen */
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; color: #1c2430; background: #f6f7f9; }
+    h1 { margin: 0 0 4px; font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin: 0 0 10px; }
+    .banner { background: #fffbea; border: 1px solid #f5d76e; color: #8a5a00; border-radius: 8px; padding: 10px 14px; margin: 12px 0 18px; font-size: .92rem; }
+    section { background: #fff; border: 1px solid #dde1e7; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px 14px; }
+    label { display: flex; flex-direction: column; font-size: .8rem; color: #4b5563; gap: 3px; }
+    input, select { font: inherit; padding: 7px 8px; border: 1px solid #c3c9d2; border-radius: 6px; }
+    button { font: inherit; padding: 9px 16px; border-radius: 6px; border: 0; background: #1a3a5c; color: #fff; cursor: pointer; }
+    button:disabled { background: #9aa6b4; cursor: not-allowed; }
+    button.plain { background: #fff; color: #1a3a5c; border: 1px solid #c3c9d2; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    .ok { color: #166534; } .bad { color: #b91c1c; } .warn { color: #b45309; }
+    #payError, #mondayResult, #photoMessage { margin-top: 10px; font-size: .92rem; white-space: pre-wrap; }
+    #card-element { margin-top: 12px; min-height: 40px; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; margin-top: 10px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e8ee; }
+    ul.checks { list-style: none; padding: 0; margin: 0; font-size: .92rem; } ul.checks li { padding: 2px 0; }
+    img.preview { max-height: 70px; margin-top: 6px; border-radius: 4px; border: 1px solid #dde1e7; }
+    small { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Home test form</h1>
+  <small>Registration Nation: payment, Monday.com and photo upload only</small>
+  <div class="banner"><strong>Test only.</strong> No scanning and no printing here. This uses your Stripe <em>test</em> keys and your real Monday board, so the test record it makes will appear on the board. Delete it when you are done.</div>
+
+  <section>
+    <h2>Setup check</h2>
+    <ul class="checks" id="checks"><li>Checking…</li></ul>
+  </section>
+
+  <section>
+    <h2>1. Customer details <small>(sample values; change anything)</small></h2>
+    <div class="grid" id="fields"></div>
+  </section>
+
+  <section>
+    <h2>2. Photos <small>(stand-ins for the camera photos; any pictures work)</small></h2>
+    <div class="grid">
+      <label>Front of the license<input type="file" id="licenseFile" accept="image/*"><img id="licensePreview" class="preview" alt="" hidden></label>
+      <label>Insurance card<input type="file" id="insuranceFile" accept="image/*"><img id="insurancePreview" class="preview" alt="" hidden></label>
+    </div>
+    <div class="row"><button id="photoButton" type="button">Save photos</button><small>Do this before paying, like at the kiosk.</small></div>
+    <div id="photoMessage" role="status"></div>
+  </section>
+
+  <section>
+    <h2>3. Payment <small id="amount"></small></h2>
+    <div id="modeBox" class="row" style="margin-top:0"></div>
+    <div id="simBox" class="row" hidden>
+      <label>Pretend the reader was tapped with
+        <select id="simCard">
+          <option value="4242424242424242">an approved card (4242…)</option>
+          <option value="4000000000000002">a declined card (4000…0002)</option>
+          <option value="4000000000009995">a card with insufficient funds (4000…9995)</option>
+        </select>
+      </label>
+    </div>
+    <div id="card-element" hidden></div>
+    <small id="cardHint" hidden>Typed card test: 4242 4242 4242 4242, any future date, any 3 digits. Declined card: 4000 0000 0000 0002.</small>
+    <div class="row"><button id="payButton" type="button" disabled>Pay (test)</button><button id="readerCancel" class="plain" type="button" hidden>Cancel on the reader</button><span id="payStatus" role="status"></span></div>
+    <div id="payError" class="bad" role="alert"></div>
+  </section>
+
+  <section>
+    <h2>4. Save to Monday.com</h2>
+    <div class="row" style="margin-top:0"><button id="mondayButton" type="button" disabled>Save to Monday</button><small>Available after a payment goes through, like at the kiosk.</small></div>
+    <div id="mondayResult" role="status"></div>
+    <table id="photoTable" hidden>
+      <thead><tr><th>Photo</th><th>What happened</th><th>Tries</th><th>Copy on this computer</th><th>Why</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <div class="row"><button class="plain" id="restart" type="button">Start over with a new customer</button></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const FIELDS = [  // [id, label, sample value]
+    ['firstName', 'First name', 'Jane'], ['lastName', 'Last name', 'Sample'], ['email', 'Email (Stripe emails the receipt here)', ''], ['phone', 'Phone', '210-555-0100'],
+    ['dateOfBirth', 'Date of birth', '1990-04-12'], ['address', 'Street address', '100 Test Street'], ['city', 'City', 'San Antonio'], ['state', 'State', 'TX'], ['zip', 'ZIP', '78249'],
+    ['licenseNumber', 'License number', '12345678'], ['licensePlate', 'License plate', 'TEST-123'], ['vin', 'VIN (17 characters)', '1HGCM82633A004352'],
+    ['vehicleYear', 'Vehicle year', '2021'], ['vehicleMake', 'Make', 'Toyota'], ['vehicleModel', 'Model', 'Camry'],
+    ['insuranceProvider', 'Insurance company', 'Sample Mutual'], ['policyNumber', 'Policy number', 'POL-0001'], ['insuranceExpiration', 'Insurance ends', '2027-06-30'],
+  ];
+  const state = { config: null, reference: 'REG-' + crypto.randomUUID().toUpperCase(), paid: null, started: false, mode: null,
+                  stripe: null, elements: null, card: null, terminal: null, connected: false, watching: null, cardReadAt: 0, sentIn: 0, approvedAt: 0 };
+
+  for (const [id, label, value] of FIELDS) {
+    const wrap = document.createElement('label'); wrap.textContent = label;
+    const input = document.createElement('input'); input.id = 'f_' + id; input.value = value; wrap.appendChild(input);
+    $('fields').appendChild(wrap);
+  }
+  const val = id => $('f_' + id).value.trim();
+
+  // calls our payment routes, the same way the kiosk's src/payment_CG.ts does
+  async function api(path, payload) {
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch('/api/payment/' + path, { method: path === 'config' ? 'GET' : 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Kiosk-Payment': '1' }, body: payload ? JSON.stringify(payload) : undefined, signal: controller.signal });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Payment service unavailable.');
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('Payment request timed out. Press Pay again to check this same payment; it will not charge twice.');
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
+  const paymentPayload = () => ({ registrant: `${val('firstName')} ${val('lastName')}`.trim(), license_plate: val('licensePlate'),
+    vehicle_year: val('vehicleYear'), vehicle_make: val('vehicleMake'), vehicle_model: val('vehicleModel'), vin: val('vin'),
+    confirmation_number: state.reference, receipt_email: val('email') });
+
+  // the same record the kiosk's App_BV_CG.tsx builds for Monday.com
+  function crmPayload(confirmation, intentId) {
+    const fullName = `${val('firstName')} ${val('lastName')}`.trim(); const plate = val('licensePlate');
+    const cityStateZip = [val('city'), `${val('state')} ${val('zip')}`.trim()].filter(Boolean).join(', ');
+    return { itemName: fullName ? `${val('lastName')}, ${val('firstName')}${plate ? ` - ${plate}` : ''}` : `Renewal ${confirmation}`,
+      fields: { fullName, firstName: val('firstName'), lastName: val('lastName'), email: val('email'), phone: val('phone'), dateOfBirth: val('dateOfBirth'),
+        address: val('address'), city: val('city'), state: val('state'), zip: val('zip'), fullAddress: [val('address'), cityStateZip].filter(Boolean).join(', '),
+        licenseNumber: val('licenseNumber'), licensePlate: plate, vin: val('vin'), vehicleYear: val('vehicleYear'), vehicleMake: val('vehicleMake'), vehicleModel: val('vehicleModel'),
+        vehicle: `${val('vehicleYear')} ${val('vehicleMake')} ${val('vehicleModel')}`.trim(), insuranceProvider: val('insuranceProvider'), policyNumber: val('policyNumber'),
+        insuranceExpiration: val('insuranceExpiration'), service: 'Vehicle Registration Renewal', amountPaid: (state.config.amount / 100).toFixed(2),
+        confirmationNumber: confirmation, paymentIntentId: intentId, paidDate: new Date().toISOString().slice(0, 10), status: 'Paid' } };
+  }
+
+  // ---------- setup check ----------
+  async function setupCheck() {
+    const list = $('checks'); list.textContent = '';
+    const add = (kind, text) => { const li = document.createElement('li'); li.className = kind; li.textContent = (kind === 'ok' ? '✓ ' : kind === 'bad' ? '✗ ' : '! ') + text; list.appendChild(li); };
+    try {
+      const s = await (await fetch('/api/home/settings')).json();
+      if (s.liveKeyFound) add('bad', 'A LIVE Stripe key is in .env. This form refuses to take payments. Switch .env to test keys.');
+      else if (s.stripeKeys) add('ok', 'Stripe test keys found');
+      else add('bad', 'Stripe test keys missing or not test keys (STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY in .env)');
+      if (s.serverReader) add('ok', 'Server-driven reader ready: the payment goes to the reader through Stripe, so no local network or DNS setup is needed');
+      else if (s.reader !== 'none') add('warn', 'Server-driven reader not available' + (s.serverReaderProblem ? ': ' + s.serverReaderProblem : '') + '. Only the browser-direct reader can be tried.');
+      if (s.reader === 'simulated') add('ok', 'Card reader: Stripe\'s simulated reader (STRIPE_SIMULATED=1)');
+      else if (s.reader === 'real') add('ok', 'Card reader: your real S700 (STRIPE_LOCATION_ID is set). It must be on the same network as this computer.');
+      else add('warn', 'Card reader not set up' + (s.readerProblem ? ': ' + s.readerProblem : '') + '. Typed card only.');
+      add(s.monday ? 'ok' : 'bad', s.monday ? 'Monday token and board found' : 'Monday token or board missing (MONDAY_API_TOKEN / MONDAY_BOARD_ID in .env)');
+      add(s.licenseColumn ? 'ok' : 'warn', s.licenseColumn ? 'License photo column set' : 'License photo column not set (MONDAY_LICENSE_PHOTO_COLUMN). That photo will be skipped.');
+      add(s.insuranceColumn ? 'ok' : 'warn', s.insuranceColumn ? 'Insurance photo column set' : 'Insurance photo column not set (MONDAY_INSURANCE_PHOTO_COLUMN). That photo will be skipped.');
+      add(s.keepLocal ? 'warn' : 'ok', s.keepLocal ? 'KIOSK_KEEP_LOCAL_PHOTOS is on: photos will NOT be deleted after upload' : 'Photos are deleted from this computer once Monday has them');
+    } catch (error) { add('bad', 'Could not reach the test server: ' + error.message); }
+  }
+
+  // ---------- photos ----------
+  for (const [input, preview] of [['licenseFile', 'licensePreview'], ['insuranceFile', 'insurancePreview']]) {
+    $(input).addEventListener('change', () => { const f = $(input).files[0]; $(preview).hidden = !f; if (f) $(preview).src = URL.createObjectURL(f); });
+  }
+  $('photoButton').addEventListener('click', async () => {
+    const message = $('photoMessage'); message.className = ''; message.textContent = '';
+    if (state.started) { message.className = 'warn'; message.textContent = 'Payment already started, so these photos would not join it. Press "Start over" first.'; return; }
+    const form = new FormData();
+    if ($('licenseFile').files[0]) form.append('license_front', $('licenseFile').files[0]);
+    if ($('insuranceFile').files[0]) form.append('insurance', $('insuranceFile').files[0]);
+    try {
+      const response = await fetch('/api/home/photos', { method: 'POST', body: form, headers: { 'X-Kiosk-Payment': '1' } });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'The photos could not be saved.');
+      message.className = 'ok'; message.textContent = 'Saved: ' + result.saved.join(' and ') + '. They will go to Monday after the record is saved.';
+    } catch (error) { message.className = 'bad'; message.textContent = error.message; }
+  });
+
+  // ---------- payment: typed card (the same flow as src/payment_CG.ts) ----------
+  async function mountCard() {
+    if (state.card) return;
+    state.stripe = Stripe(state.config.publishableKey); // [3RD PARTY: Stripe.js]
+    state.elements = state.stripe.elements({ mode: 'payment', amount: state.config.amount, currency: state.config.currency, paymentMethodTypes: ['card'], captureMethod: 'manual' }); // [3RD PARTY: Stripe.js]
+    state.card = state.elements.create('payment', { layout: 'tabs', fields: { billingDetails: { name: 'auto' } }, wallets: { applePay: 'never', googlePay: 'never', link: 'never' } }); // [3RD PARTY: Stripe.js]
+    state.card.mount('#card-element');
+  }
+  async function payWithCard(payload, onStatus) {
+    onStatus('Checking payment…');
+    const intent = await api('create_intent', { ...payload, payment_mode: 'card' });
+    if (intent.status === 'succeeded') return intent;
+    if (intent.status === 'requires_capture') return api('capture_intent', payload);
+    if (intent.status === 'requires_action') {
+      const action = await state.stripe.handleNextAction({ clientSecret: intent.client_secret }); // [3RD PARTY: Stripe.js]
+      if (action.error) throw new Error(action.error.message || 'Card authentication was not completed. Retry the same payment.');
+      return api('capture_intent', payload);
+    }
+    if (!['requires_payment_method', 'requires_confirmation'].includes(intent.status)) throw new Error(`Payment status: ${intent.status}. Retry to check its status; do not start another charge.`);
+    state.cardReadAt = performance.now();
+    const submitted = await state.elements.submit(); // [3RD PARTY: Stripe.js]
+    if (submitted.error) throw new Error(submitted.error.message || 'Complete the card details.');
+    onStatus('Confirming your card…');
+    const result = await state.stripe.confirmPayment({ elements: state.elements, clientSecret: intent.client_secret, confirmParams: { return_url: location.origin + '/' }, redirect: 'if_required' }); // [3RD PARTY: Stripe.js]
+    if (result.error) throw new Error((result.error.message || 'Card payment was not confirmed.') + ' Retry to check the same payment.');
+    onStatus('Completing payment…');
+    return api('capture_intent', payload);
+  }
+
+  // ---------- payment: card reader (the same flow as src/terminal_CG.ts) ----------
+  async function connectReader() {
+    const settings = state.config.terminal;
+    if (!state.terminal) {
+      state.terminal = StripeTerminal.create({ // [3RD PARTY: Stripe Terminal JS SDK]
+        onFetchConnectionToken: async () => (await api('connection_token')).secret,
+        onUnexpectedReaderDisconnect: () => { state.connected = false; },
+      });
+    }
+    if (state.connected) return;
+    const found = await state.terminal.discoverReaders(settings.simulated ? { simulated: true } : { simulated: false, location: settings.location || undefined }); // [3RD PARTY: Stripe Terminal JS SDK]
+    if ('error' in found) throw new Error(found.error.message || 'Could not search for the card reader.');
+    if (found.discoveredReaders.length === 0) throw new Error(settings.simulated ? 'No simulated card reader was found.' : 'No card reader was found. Check that it is powered on, on the same network as this computer, and registered in Stripe.');
+    const connection = await state.terminal.connectReader(found.discoveredReaders[0]); // [3RD PARTY: Stripe Terminal JS SDK]
+    if ('error' in connection) throw new Error(connection.error.message || 'Could not connect to the card reader.');
+    state.connected = true;
+  }
+  async function payWithReader(payload, onStatus) {
+    if (!state.connected) { onStatus('Connecting to the card reader…'); await connectReader(); }
+    onStatus('Checking payment…');
+    const intent = await api('create_intent', { ...payload, payment_mode: 'terminal' });
+    if (intent.status === 'succeeded') return intent;
+    if (intent.status === 'requires_capture') return api('capture_intent', payload);
+    if (intent.status !== 'requires_payment_method') throw new Error(`Payment status: ${intent.status}. Retry to check its status; do not start another charge.`);
+    if (state.config.terminal.simulated) state.terminal.setSimulatorConfiguration({ testCardNumber: $('simCard').value }); // [3RD PARTY: Stripe Terminal JS SDK] only the fake reader takes this
+    onStatus(state.config.terminal.simulated ? 'The simulated reader is reading the card…' : 'Tap, insert, or swipe the card on the reader…');
+    const collected = await state.terminal.collectPaymentMethod(intent.client_secret); // [3RD PARTY: Stripe Terminal JS SDK]
+    if ('error' in collected) { const text = collected.error.message || 'The card was not read.'; throw new Error(/cancel/i.test(text) ? 'Reader payment canceled.' : text); }
+    state.cardReadAt = performance.now(); // from here on it is processing and capture, with no customer waiting to tap
+    onStatus('Processing the card…');
+    const processed = await state.terminal.processPayment(collected.paymentIntent); // [3RD PARTY: Stripe Terminal JS SDK]
+    if ('error' in processed) throw new Error((processed.error.message || 'The card was declined.') + ' (This is what a declined card looks like on the real kiosk too.)');
+    onStatus('Completing payment…');
+    return api('capture_intent', payload);
+  }
+
+  // ---------- payment: card reader, server-driven (the kiosk server asks Stripe, Stripe tells the reader) ----------
+  // nothing here talks to the reader, so it works on networks that block devices from reaching each other
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  async function waitForReader(payload, answer) {
+    const deadline = Date.now() + 120000;
+    while (answer.reader !== 'approved') {
+      if (answer.reader === 'failed') throw new Error((answer.readerMessage || 'The card was not accepted.') + ' Press Pay to try again; it reuses the same payment, so nothing is charged twice.');
+      if (answer.reader === 'idle') throw new Error(answer.readerMessage || 'The reader is no longer asking for this payment (it was canceled). Press Pay to send it again.');
+      if (Date.now() > deadline) {
+        await api('reader_cancel', payload).catch(() => undefined);
+        throw new Error('No card was read within 2 minutes, so the reader was cleared. Press Pay to try again.');
+      }
+      await pause(1000); // about once a second, like reader_test_CG.py
+      answer = await api('reader_status', payload);
+    }
+    return answer;
+  }
+  async function payWithServerReader(payload, onStatus) {
+    onStatus('Sending the payment to the card reader…');
+    const sendStarted = performance.now();
+    let answer = await api('reader_start', payload);
+    state.sentIn = performance.now() - sendStarted;
+    if (answer.status === 'succeeded') return answer;
+    if (answer.reader !== 'approved') {
+      $('readerCancel').hidden = false;
+      if (state.config.serverReader.simulated) {
+        onStatus('The simulated reader is reading the card…');
+        state.cardReadAt = performance.now(); // the pretend tap happens right now, so this is a fair start for the processing time
+        answer = await api('reader_simulate_tap', { ...payload, test_card: $('simCard').value });
+      } else {
+        onStatus('Tap, insert, or swipe the card on the reader…');
+      }
+      try { answer = await waitForReader(payload, answer); } finally { $('readerCancel').hidden = true; }
+    }
+    state.approvedAt = performance.now();
+    onStatus('Completing payment…');
+    return api('capture_intent', payload);
+  }
+  $('readerCancel').addEventListener('click', () => { api('reader_cancel', paymentPayload()).catch(error => { $('payError').textContent = error.message; }); });
+
+  // ---------- screen logic ----------
+  async function loadPayment() {
+    try { state.config = await api('config'); } catch (error) { $('payError').textContent = error.message; return; }
+    $('amount').textContent = '($' + (state.config.amount / 100).toFixed(2) + ' test charge)';
+    const box = $('modeBox'); box.textContent = '';
+    const which = state.config.terminal && state.config.terminal.simulated ? 'simulated' : 'S700';
+    const modes = (state.config.serverReader && state.config.serverReader.enabled ? [['server', `Card reader (${which}) through Stripe: server-driven, the new way`]] : [])
+      .concat(state.config.terminal && state.config.terminal.enabled ? [['reader', `Card reader (${which}) direct from this browser: what the kiosk uses today`]] : [])
+      .concat([['card', 'Typed card']]);
+    for (const [value, text] of modes) {
+      const label = document.createElement('label'); label.style.flexDirection = 'row'; label.style.alignItems = 'center'; label.style.gap = '6px'; label.style.fontSize = '.95rem';
+      const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'mode'; radio.value = value;
+      radio.addEventListener('change', () => chooseMode(value)); label.append(radio, text); box.appendChild(label);
+    }
+    box.querySelector('input').checked = true; chooseMode(modes[0][0]);
+  }
+  async function chooseMode(mode) {
+    // leaving the server-driven reader mid-payment: clear the reader's screen so it stops asking for the card
+    if (state.mode === 'server' && mode !== 'server' && state.started && !state.paid) api('reader_cancel', paymentPayload()).catch(() => undefined);
+    state.mode = mode; $('payError').textContent = '';
+    $('simBox').hidden = !((mode === 'reader' || mode === 'server') && state.config.terminal.simulated);
+    $('card-element').hidden = mode !== 'card'; $('cardHint').hidden = mode !== 'card';
+    $('payButton').disabled = !!state.paid;
+    if (mode === 'card') { try { await mountCard(); } catch (error) { $('payError').textContent = 'Stripe could not load. Check the internet connection. ' + error.message; } }
+  }
+  $('payButton').addEventListener('click', async () => {
+    if (state.paid) return;
+    $('payError').textContent = ''; $('payButton').disabled = true; state.started = true; state.cardReadAt = 0; state.sentIn = 0; state.approvedAt = 0;
+    const pressedAt = performance.now();
+    const onStatus = text => { $('payStatus').textContent = text; };
+    try {
+      const result = await ({ server: payWithServerReader, reader: payWithReader, card: payWithCard }[state.mode])(paymentPayload(), onStatus);
+      if (result.status !== 'succeeded') throw new Error('Payment is not confirmed. Press Pay again to check its status.');
+      const done = performance.now(); const seconds = ms => (ms / 1000).toFixed(1) + ' s';
+      state.paid = result; $('payStatus').className = 'ok';
+      let timing = 'Total ' + seconds(done - pressedAt);
+      if (state.cardReadAt) timing += '; ' + seconds(done - state.cardReadAt) + ' after the card was read';
+      if (state.mode === 'server') {
+        timing += '; sending to the reader took ' + seconds(state.sentIn);
+        // with a real reader the page can't see the moment of the tap, only the first status check after approval
+        if (!state.cardReadAt && state.approvedAt) timing += '; ' + seconds(done - state.approvedAt) + ' from approval seen to payment complete (status is checked every 1 s, so the tap moment itself is not visible)';
+      }
+      $('payStatus').textContent = 'Payment confirmed (' + result.id + ', test mode). ' + timing + '.';
+      $('mondayButton').disabled = false;
+    } catch (error) {
+      $('payStatus').textContent = ''; $('payError').textContent = error.message; $('payButton').disabled = false;
+    }
+  });
+
+  // ---------- monday ----------
+  $('mondayButton').addEventListener('click', async () => {
+    const out = $('mondayResult'); out.className = ''; out.textContent = 'Saving…'; $('mondayButton').disabled = true;
+    const savingStarted = performance.now();
+    try {
+      const response = await fetch('/api/monday/create_record', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(crmPayload(state.reference, state.paid.id)) });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || 'Monday did not accept the record.');
+      out.className = 'ok'; out.textContent = 'Saved to Monday (item ' + result.itemId + ') in ' + ((performance.now() - savingStarted) / 1000).toFixed(1) + ' s.' + (result.warnings && result.warnings.length ? '\nSkipped: ' + result.warnings.join('; ') : '');
+      watchPhotos();
+    } catch (error) { out.className = 'bad'; out.textContent = error.message; $('mondayButton').disabled = false; }
+  });
+  // a refused photo is retried after 1, 2, 4 and 8 minutes, so it can take about 15 minutes to give up. The table keeps watching that long
+  const WATCH_FOR_MS = 20 * 60 * 1000;
+  function nextTry(p) {
+    if (p.state !== 'waiting' || p.retryIn === null || p.retryIn === undefined) return '';
+    const s = p.retryIn; return s <= 0 ? ' (trying again now)' : ' (next try in ' + (s >= 60 ? Math.ceil(s / 60) + ' min' : s + ' s') + ')';
+  }
+  const WORDS = { waiting: 'waiting, will retry on its own', uploaded: 'uploaded to Monday', skipped: 'not uploaded (no column set)', failed: 'gave up (see runtime/home_test/kiosk-problems.log)' };
+  function watchPhotos() {
+    $('photoTable').hidden = false; const started = Date.now();
+    clearInterval(state.watching);
+    const look = async () => {
+      try {
+        const result = await (await fetch('/api/home/photo_status/' + encodeURIComponent(state.reference))).json();
+        const body = $('photoTable').querySelector('tbody'); body.textContent = '';
+        for (const p of result.photos || []) {
+          const tr = document.createElement('tr');
+          const copy = p.state === 'uploaded' ? (p.onKiosk ? 'still here (not deleted)' : 'deleted ✓') : (p.onKiosk ? 'kept here' : 'gone');
+          for (const text of [p.kind === 'license' ? 'Front of license' : 'Insurance card', (WORDS[p.state] || p.state) + nextTry(p), String(p.attempts), copy, p.note || '']) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
+          body.appendChild(tr);
+        }
+        const rows = result.photos || [];
+        if ((rows.length && rows.every(p => p.state !== 'waiting')) || Date.now() - started > WATCH_FOR_MS) clearInterval(state.watching);
+      } catch (error) { /* try again on the next tick */ }
+    };
+    look(); state.watching = setInterval(look, 2000);
+  }
+
+  $('restart').addEventListener('click', () => location.reload());
+  setupCheck(); loadPayment();
+})();
+</script>
+</body>
+</html>
