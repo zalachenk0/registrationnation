@@ -1,95 +1,89 @@
 // ============================================================================
 // File:         terminal_CG.ts
 // Written by:   CG (Cristian Gonzalez)
-// What it does: Browser side card reader connection and payment.
-// Team-written: All logic written by CG (Cristian Gonzalez), except the lines
-//               tagged [3RD PARTY].
-// Third-party:  Stripe Terminal JS SDK (@stripe/terminal-js); Stripe Terminal JS
-//               SDK (stripe.com/docs/terminal/js).
+// What it does: Browser side card reader payment, the server-driven way: our
+//               server asks Stripe to put the payment on the reader, and Stripe
+//               carries it to the reader over the internet. The browser never
+//               talks to the reader, so any Wi-Fi with internet works (no local
+//               DNS setup, no device-to-device traffic).
+// Team-written: All logic written by CG (Cristian Gonzalez).
+// Third-party:  None directly. The Stripe calls happen on the server
+//               (payment_service_CG.py) and follow Stripe's server-driven
+//               Terminal guide. Until this file is built into dist/, the built
+//               screen gets the same behavior from
+//               dist/stripe-terminal-server_CG.js.
 // ============================================================================
-import { loadStripeTerminal } from "@stripe/terminal-js";
-import { api, getPaymentConfig, type CardEntry, type PaymentResult, type TerminalSettings } from "./payment_CG";
+import { api, getPaymentConfig, type CardEntry, type PaymentResult } from "./payment_CG";
 
-type StripeTerminalSDK = NonNullable<Awaited<ReturnType<typeof loadStripeTerminal>>>;
-type Terminal = ReturnType<StripeTerminalSDK["create"]>;
+const CHECK_EVERY_MS = 1000;            // how often the reader's progress is checked, like reader_test_CG.py
+const WAIT_LIMIT_MS = 5 * 60 * 1000;    // a reader left asking for a card this long is cleared
+const NETWORK_TRIES = 5;                // brief hiccups are retried; checking again can never charge twice
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// one reader connection for the whole kiosk session, so every customer doesn't wait for a reconnect
-let terminal: Terminal | null = null;
-let connected = false;
+// the payment the reader is asking for right now, so Cancel knows what to clear
+let waiting: { payload: Record<string, string>; stopped: boolean } | null = null;
 
-// the Terminal SDK asks for this whenever it needs permission to talk to the reader. the secret key stays on the server
-async function fetchConnectionToken(): Promise<string> {
-  const result = await api("connection_token");
-  return result.secret;
+async function waitForCard(job: { payload: Record<string, string>; stopped: boolean }, first: PaymentResult): Promise<PaymentResult> {
+  const started = Date.now();
+  let answer = first;
+  let misses = 0;
+  for (;;) {
+    if (answer.reader === "approved") return answer;
+    if (job.stopped) {
+      // one last look: a card approved at the same moment as Cancel has to be captured, not left held on the customer's card
+      const last: PaymentResult = await api("reader_status", job.payload).catch(() => answer);
+      if (last.reader === "approved") return last;
+      throw new Error("Reader payment canceled. Press Pay to try the reader again.");
+    }
+    if (answer.reader === "failed") throw new Error((answer.readerMessage || "The card was declined.") + " Try another card.");
+    if (answer.reader === "idle") throw new Error("Reader payment canceled. Press Pay to try the reader again.");
+    if (Date.now() - started > WAIT_LIMIT_MS) {
+      await api("reader_cancel", job.payload).catch(() => undefined);
+      throw new Error("No card was read within 5 minutes, so the reader was cleared. Press Pay to try again.");
+    }
+    await pause(CHECK_EVERY_MS);
+    try {
+      answer = await api("reader_status", job.payload);
+      misses = 0;
+    } catch (error) {
+      if (++misses >= NETWORK_TRIES) throw error;
+    }
+  }
 }
 
-export async function connectReader(settings: TerminalSettings): Promise<void> {
-  if (!terminal) {
-    const sdk = await loadStripeTerminal();  // [3RD PARTY: Stripe Terminal JS SDK]
-    if (!sdk) throw new Error("Stripe Terminal could not load. Check this kiosk’s internet connection.");
-    terminal = sdk.create({
-      onFetchConnectionToken: fetchConnectionToken,
-      onUnexpectedReaderDisconnect: () => { connected = false; },
-    });
-  }
-  if (connected) return;
-  const found = await terminal.discoverReaders(  // [3RD PARTY: Stripe Terminal JS SDK]
-    settings.simulated ? { simulated: true } : { simulated: false, location: settings.location ?? undefined },
-  );
-  if ("error" in found) throw new Error(found.error.message || "Could not search for the card reader.");
-  if (found.discoveredReaders.length === 0) {
-    throw new Error(settings.simulated
-      ? "No simulated card reader was found."
-      : "No card reader was found. Check that it is powered on, on the same network as this kiosk, and registered in Stripe.");
-  }
-  const connection = await terminal.connectReader(found.discoveredReaders[0]);  // [3RD PARTY: Stripe Terminal JS SDK]
-  if ("error" in connection) throw new Error(connection.error.message || "Could not connect to the card reader.");
-  connected = true;
-}
-
-// reader flow: ask our server to open the charge, the reader reads the card, Stripe approves it, our server takes the money
-async function collectAndCharge(settings: TerminalSettings, payload: Record<string, string>, onStatus: (text: string) => void): Promise<PaymentResult> {
-  if (!connected) {
-    onStatus("Reconnecting to the card reader…");
-    await connectReader(settings);
-  }
-  const reader = terminal!;
+// reader flow: the server reuses this transaction's payment (or makes the one and only new one), Stripe shows it on the reader,
+// the customer taps, Stripe approves, and our server takes the money
+async function collectAndCharge(payload: Record<string, string>, onStatus: (text: string) => void): Promise<PaymentResult> {
   onStatus("Checking payment…");
-  // the server returns an existing payment for this transaction, so a retry never starts a second charge
-  const intent = await api("create_intent", { ...payload, payment_mode: "terminal" });
-  if (intent.status === "succeeded") return intent;
-  if (intent.status === "requires_capture") return api("capture_intent", payload);
-  // the server always hands back a fresh payment when the card was read but never approved, so this is the only unpaid state we can see
-  if (intent.status !== "requires_payment_method") {
-    throw new Error(`Payment status: ${intent.status}. Retry to check its status; do not start another charge.`);
+  const started: PaymentResult = await api("reader_start", payload);
+  if (started.status === "succeeded") return started;
+  const job = { payload, stopped: false };
+  waiting = job;
+  try {
+    let answer = started;
+    if (answer.reader !== "approved") {
+      onStatus("Tap, insert, or swipe the card on the reader…");
+      answer = await waitForCard(job, answer);
+    }
+  } finally {
+    if (waiting === job) waiting = null;
   }
-
-  // test mode with Stripe's fake reader only: tells it which test card to pretend was used
-  if (settings.simulated) reader.setSimulatorConfiguration({ testCardNumber: "4242424242424242" });  // [3RD PARTY: Stripe Terminal JS SDK]
-
-  onStatus("Tap, insert, or swipe the card on the reader…");
-  const collected = await reader.collectPaymentMethod(intent.client_secret);  // [3RD PARTY: Stripe Terminal JS SDK]
-  if ("error" in collected) {
-    const text = collected.error.message || "The card was not read.";
-    throw new Error(/cancel/i.test(text) ? "Reader payment canceled. Try the reader again or enter the card manually." : text + " Try again, or enter the card manually.");
-  }
-
-  onStatus("Processing your card…");
-  const processed = await reader.processPayment(collected.paymentIntent);  // [3RD PARTY: Stripe Terminal JS SDK]
-  if ("error" in processed) throw new Error((processed.error.message || "The card was declined.") + " Try another card, or enter the card manually.");
   onStatus("Completing payment…");
   return api("capture_intent", payload);
 }
 
 export async function mountTerminalEntry(): Promise<CardEntry> {
   const config = await getPaymentConfig();
-  const settings = config.terminal;
-  if (!settings?.enabled) throw new Error(settings?.problem || "The card reader is not set up on this kiosk.");
-  await connectReader(settings);
-  const stopWaiting = () => { void terminal?.cancelCollectPaymentMethod().catch(() => undefined); };  // [3RD PARTY: Stripe Terminal JS SDK]
+  const settings = config.serverReader;
+  if (!settings?.enabled) throw new Error(settings?.problem || config.terminal?.problem || "The card reader is not set up on this kiosk.");
+  const stopWaiting = () => {
+    const job = waiting;
+    if (!job) return;
+    job.stopped = true;
+    void api("reader_cancel", job.payload).catch(() => undefined);
+  };
   return {
-    simulated: settings.simulated,
-    pay: (payload, onStatus) => collectAndCharge(settings, payload, onStatus),
+    pay: (payload, onStatus) => collectAndCharge(payload, onStatus),
     cancel: stopWaiting,
     destroy: stopWaiting,
   };

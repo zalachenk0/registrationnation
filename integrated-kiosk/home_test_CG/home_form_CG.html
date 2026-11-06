@@ -3,22 +3,21 @@
 File:         home_form_CG.html
 Written by:   CG (Cristian Gonzalez)
 What it does: The page for the home test form: customer details, two stand-in
-              photos, test payment (card reader or typed card) and the save
-              to Monday.com. No scanning and no printing.
+              photos, a test payment on the physical S700 card reader and the
+              save to Monday.com. No scanning and no printing.
 Team-written: All logic and layout written by CG. The payment code follows
               the same Stripe calls as the kiosk's src/payment_CG.ts and
               src/terminal_CG.ts, plus the server-driven reader routes
               (payment_service_CG.py), which follow Stripe's server-driven
               Terminal guide.
-Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
-              (js.stripe.com/terminal/v1), loaded from Stripe's website.
+Third-party:  The Stripe Terminal JS SDK (js.stripe.com/terminal/v1), loaded
+              from Stripe's website, for the browser-direct choice only.
 ============================================================================ -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Home test form (Registration Nation)</title>
-  <script src="https://js.stripe.com/v3/"></script> <!-- [3RD PARTY: Stripe.js] -->
   <script src="https://js.stripe.com/terminal/v1/"></script> <!-- [3RD PARTY: Stripe Terminal JS SDK] -->
   <style>
     [hidden] { display: none !important; }  /* so a class that sets display (like .row) can never keep a hidden box on screen */
@@ -36,7 +35,6 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
     .ok { color: #166534; } .bad { color: #b91c1c; } .warn { color: #b45309; }
     #payError, #mondayResult, #photoMessage { margin-top: 10px; font-size: .92rem; white-space: pre-wrap; }
-    #card-element { margin-top: 12px; min-height: 40px; }
     table { border-collapse: collapse; width: 100%; font-size: .9rem; margin-top: 10px; }
     th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e8ee; }
     ul.checks { list-style: none; padding: 0; margin: 0; font-size: .92rem; } ul.checks li { padding: 2px 0; }
@@ -72,17 +70,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
   <section>
     <h2>3. Payment <small id="amount"></small></h2>
     <div id="modeBox" class="row" style="margin-top:0"></div>
-    <div id="simBox" class="row" hidden>
-      <label>Pretend the reader was tapped with
-        <select id="simCard">
-          <option value="4242424242424242">an approved card (4242…)</option>
-          <option value="4000000000000002">a declined card (4000…0002)</option>
-          <option value="4000000000009995">a card with insufficient funds (4000…9995)</option>
-        </select>
-      </label>
-    </div>
-    <div id="card-element" hidden></div>
-    <small id="cardHint" hidden>Typed card test: 4242 4242 4242 4242, any future date, any 3 digits. Declined card: 4000 0000 0000 0002.</small>
+    <small>Physical S700 only. Tap a Stripe test card: 4242 4242 4242 4242 is approved, 4000 0000 0000 0002 is declined.</small>
     <div class="row"><button id="payButton" type="button" disabled>Pay (test)</button><button id="readerCancel" class="plain" type="button" hidden>Cancel on the reader</button><span id="payStatus" role="status"></span></div>
     <div id="payError" class="bad" role="alert"></div>
   </section>
@@ -110,7 +98,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     ['insuranceProvider', 'Insurance company', 'Sample Mutual'], ['policyNumber', 'Policy number', 'POL-0001'], ['insuranceExpiration', 'Insurance ends', '2027-06-30'],
   ];
   const state = { config: null, reference: 'REG-' + crypto.randomUUID().toUpperCase(), paid: null, started: false, mode: null,
-                  stripe: null, elements: null, card: null, terminal: null, connected: false, watching: null, cardReadAt: 0, sentIn: 0, approvedAt: 0 };
+                  terminal: null, connected: false, watching: null, cardReadAt: 0, sentIn: 0, approvedAt: 0 };
 
   for (const [id, label, value] of FIELDS) {
     const wrap = document.createElement('label'); wrap.textContent = label;
@@ -159,12 +147,11 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
       const s = await (await fetch('/api/home/settings')).json();
       if (s.liveKeyFound) add('bad', 'A LIVE Stripe key is in .env. This form refuses to take payments. Switch .env to test keys.');
       else if (s.stripeKeys) add('ok', 'Stripe test keys found');
-      else add('bad', 'Stripe test keys missing or not test keys (STRIPE_SECRET_KEY / STRIPE_PUBLISHABLE_KEY in .env)');
+      else add('bad', 'Stripe test secret key missing or not a test key (STRIPE_SECRET_KEY in .env)');
       if (s.serverReader) add('ok', 'Server-driven reader ready: the payment goes to the reader through Stripe, so no local network or DNS setup is needed');
       else if (s.reader !== 'none') add('warn', 'Server-driven reader not available' + (s.serverReaderProblem ? ': ' + s.serverReaderProblem : '') + '. Only the browser-direct reader can be tried.');
-      if (s.reader === 'simulated') add('ok', 'Card reader: Stripe\'s simulated reader (STRIPE_SIMULATED=1)');
-      else if (s.reader === 'real') add('ok', 'Card reader: your real S700 (STRIPE_LOCATION_ID is set). It must be on the same network as this computer.');
-      else add('warn', 'Card reader not set up' + (s.readerProblem ? ': ' + s.readerProblem : '') + '. Typed card only.');
+      if (s.reader === 'real') add('ok', 'Card reader: your physical S700 (STRIPE_LOCATION_ID is set). For the browser-direct choice it must be on the same network as this computer.');
+      else add('bad', 'Card reader not set up' + (s.readerProblem ? ': ' + s.readerProblem : '') + '. Payments need the physical S700.');
       add(s.monday ? 'ok' : 'bad', s.monday ? 'Monday token and board found' : 'Monday token or board missing (MONDAY_API_TOKEN / MONDAY_BOARD_ID in .env)');
       add(s.licenseColumn ? 'ok' : 'warn', s.licenseColumn ? 'License photo column set' : 'License photo column not set (MONDAY_LICENSE_PHOTO_COLUMN). That photo will be skipped.');
       add(s.insuranceColumn ? 'ok' : 'warn', s.insuranceColumn ? 'Insurance photo column set' : 'Insurance photo column not set (MONDAY_INSURANCE_PHOTO_COLUMN). That photo will be skipped.');
@@ -190,35 +177,6 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     } catch (error) { message.className = 'bad'; message.textContent = error.message; }
   });
 
-  // ---------- payment: typed card (the same flow as src/payment_CG.ts) ----------
-  async function mountCard() {
-    if (state.card) return;
-    state.stripe = Stripe(state.config.publishableKey); // [3RD PARTY: Stripe.js]
-    state.elements = state.stripe.elements({ mode: 'payment', amount: state.config.amount, currency: state.config.currency, paymentMethodTypes: ['card'], captureMethod: 'manual' }); // [3RD PARTY: Stripe.js]
-    state.card = state.elements.create('payment', { layout: 'tabs', fields: { billingDetails: { name: 'auto' } }, wallets: { applePay: 'never', googlePay: 'never', link: 'never' } }); // [3RD PARTY: Stripe.js]
-    state.card.mount('#card-element');
-  }
-  async function payWithCard(payload, onStatus) {
-    onStatus('Checking payment…');
-    const intent = await api('create_intent', { ...payload, payment_mode: 'card' });
-    if (intent.status === 'succeeded') return intent;
-    if (intent.status === 'requires_capture') return api('capture_intent', payload);
-    if (intent.status === 'requires_action') {
-      const action = await state.stripe.handleNextAction({ clientSecret: intent.client_secret }); // [3RD PARTY: Stripe.js]
-      if (action.error) throw new Error(action.error.message || 'Card authentication was not completed. Retry the same payment.');
-      return api('capture_intent', payload);
-    }
-    if (!['requires_payment_method', 'requires_confirmation'].includes(intent.status)) throw new Error(`Payment status: ${intent.status}. Retry to check its status; do not start another charge.`);
-    state.cardReadAt = performance.now();
-    const submitted = await state.elements.submit(); // [3RD PARTY: Stripe.js]
-    if (submitted.error) throw new Error(submitted.error.message || 'Complete the card details.');
-    onStatus('Confirming your card…');
-    const result = await state.stripe.confirmPayment({ elements: state.elements, clientSecret: intent.client_secret, confirmParams: { return_url: location.origin + '/' }, redirect: 'if_required' }); // [3RD PARTY: Stripe.js]
-    if (result.error) throw new Error((result.error.message || 'Card payment was not confirmed.') + ' Retry to check the same payment.');
-    onStatus('Completing payment…');
-    return api('capture_intent', payload);
-  }
-
   // ---------- payment: card reader (the same flow as src/terminal_CG.ts) ----------
   async function connectReader() {
     const settings = state.config.terminal;
@@ -229,9 +187,9 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
       });
     }
     if (state.connected) return;
-    const found = await state.terminal.discoverReaders(settings.simulated ? { simulated: true } : { simulated: false, location: settings.location || undefined }); // [3RD PARTY: Stripe Terminal JS SDK]
+    const found = await state.terminal.discoverReaders({ simulated: false, location: settings.location || undefined }); // [3RD PARTY: Stripe Terminal JS SDK]
     if ('error' in found) throw new Error(found.error.message || 'Could not search for the card reader.');
-    if (found.discoveredReaders.length === 0) throw new Error(settings.simulated ? 'No simulated card reader was found.' : 'No card reader was found. Check that it is powered on, on the same network as this computer, and registered in Stripe.');
+    if (found.discoveredReaders.length === 0) throw new Error('No card reader was found. Check that it is powered on, on the same network as this computer, and registered in Stripe.');
     const connection = await state.terminal.connectReader(found.discoveredReaders[0]); // [3RD PARTY: Stripe Terminal JS SDK]
     if ('error' in connection) throw new Error(connection.error.message || 'Could not connect to the card reader.');
     state.connected = true;
@@ -243,8 +201,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     if (intent.status === 'succeeded') return intent;
     if (intent.status === 'requires_capture') return api('capture_intent', payload);
     if (intent.status !== 'requires_payment_method') throw new Error(`Payment status: ${intent.status}. Retry to check its status; do not start another charge.`);
-    if (state.config.terminal.simulated) state.terminal.setSimulatorConfiguration({ testCardNumber: $('simCard').value }); // [3RD PARTY: Stripe Terminal JS SDK] only the fake reader takes this
-    onStatus(state.config.terminal.simulated ? 'The simulated reader is reading the card…' : 'Tap, insert, or swipe the card on the reader…');
+    onStatus('Tap, insert, or swipe the card on the reader…');
     const collected = await state.terminal.collectPaymentMethod(intent.client_secret); // [3RD PARTY: Stripe Terminal JS SDK]
     if ('error' in collected) { const text = collected.error.message || 'The card was not read.'; throw new Error(/cancel/i.test(text) ? 'Reader payment canceled.' : text); }
     state.cardReadAt = performance.now(); // from here on it is processing and capture, with no customer waiting to tap
@@ -280,13 +237,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     if (answer.status === 'succeeded') return answer;
     if (answer.reader !== 'approved') {
       $('readerCancel').hidden = false;
-      if (state.config.serverReader.simulated) {
-        onStatus('The simulated reader is reading the card…');
-        state.cardReadAt = performance.now(); // the pretend tap happens right now, so this is a fair start for the processing time
-        answer = await api('reader_simulate_tap', { ...payload, test_card: $('simCard').value });
-      } else {
-        onStatus('Tap, insert, or swipe the card on the reader…');
-      }
+      onStatus('Tap, insert, or swipe the card on the reader…');
       try { answer = await waitForReader(payload, answer); } finally { $('readerCancel').hidden = true; }
     }
     state.approvedAt = performance.now();
@@ -300,10 +251,13 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     try { state.config = await api('config'); } catch (error) { $('payError').textContent = error.message; return; }
     $('amount').textContent = '($' + (state.config.amount / 100).toFixed(2) + ' test charge)';
     const box = $('modeBox'); box.textContent = '';
-    const which = state.config.terminal && state.config.terminal.simulated ? 'simulated' : 'S700';
-    const modes = (state.config.serverReader && state.config.serverReader.enabled ? [['server', `Card reader (${which}) through Stripe: server-driven, the new way`]] : [])
-      .concat(state.config.terminal && state.config.terminal.enabled ? [['reader', `Card reader (${which}) direct from this browser: what the kiosk uses today`]] : [])
-      .concat([['card', 'Typed card']]);
+    // [CG] physical S700 only: no simulator and no typed card. Both choices need STRIPE_LOCATION_ID
+    const modes = (state.config.serverReader && state.config.serverReader.enabled ? [['server', 'Card reader (S700) through Stripe: server-driven, what the kiosk uses']] : [])
+      .concat(state.config.terminal && state.config.terminal.location ? [['reader', 'Card reader (S700) direct from this browser: the older way, for comparison']] : []);
+    if (!modes.length) {
+      $('payError').textContent = (state.config.serverReader && state.config.serverReader.problem) || 'The card reader is not set up. See the Setup check.';
+      return;
+    }
     for (const [value, text] of modes) {
       const label = document.createElement('label'); label.style.flexDirection = 'row'; label.style.alignItems = 'center'; label.style.gap = '6px'; label.style.fontSize = '.95rem';
       const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'mode'; radio.value = value;
@@ -315,10 +269,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     // leaving the server-driven reader mid-payment: clear the reader's screen so it stops asking for the card
     if (state.mode === 'server' && mode !== 'server' && state.started && !state.paid) api('reader_cancel', paymentPayload()).catch(() => undefined);
     state.mode = mode; $('payError').textContent = '';
-    $('simBox').hidden = !((mode === 'reader' || mode === 'server') && state.config.terminal.simulated);
-    $('card-element').hidden = mode !== 'card'; $('cardHint').hidden = mode !== 'card';
     $('payButton').disabled = !!state.paid;
-    if (mode === 'card') { try { await mountCard(); } catch (error) { $('payError').textContent = 'Stripe could not load. Check the internet connection. ' + error.message; } }
   }
   $('payButton').addEventListener('click', async () => {
     if (state.paid) return;
@@ -326,7 +277,7 @@ Third-party:  Stripe.js (js.stripe.com/v3) and the Stripe Terminal JS SDK
     const pressedAt = performance.now();
     const onStatus = text => { $('payStatus').textContent = text; };
     try {
-      const result = await ({ server: payWithServerReader, reader: payWithReader, card: payWithCard }[state.mode])(paymentPayload(), onStatus);
+      const result = await ({ server: payWithServerReader, reader: payWithReader }[state.mode])(paymentPayload(), onStatus);
       if (result.status !== 'succeeded') throw new Error('Payment is not confirmed. Press Pay again to check its status.');
       const done = performance.now(); const seconds = ms => (ms / 1000).toFixed(1) + ' s';
       state.paid = result; $('payStatus').className = 'ok';

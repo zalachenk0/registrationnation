@@ -96,9 +96,9 @@ def create_app(scratch=None):
         reader = terminal_settings()
         server = server_reader_settings()
         return jsonify(
-            stripeKeys=os.getenv('STRIPE_SECRET_KEY', '').startswith('sk_test_') and os.getenv('STRIPE_PUBLISHABLE_KEY', '').startswith('pk_test_'),
+            stripeKeys=os.getenv('STRIPE_SECRET_KEY', '').startswith('sk_test_'),  # [CG] reader only, so no publishable key needed
             liveKeyFound=os.getenv('STRIPE_SECRET_KEY', '').startswith(('sk_live_', 'rk_live_')),
-            reader='simulated' if reader['simulated'] else ('real' if reader['enabled'] else 'none'), readerProblem=reader['problem'],
+            reader='real' if reader['enabled'] else 'none', readerProblem=reader['problem'],
             serverReader=server['enabled'], serverReaderProblem=server['problem'],
             monday=has('MONDAY_API_TOKEN') and has('MONDAY_BOARD_ID'),
             licenseColumn=has('MONDAY_LICENSE_PHOTO_COLUMN'), insuranceColumn=has('MONDAY_INSURANCE_PHOTO_COLUMN'),
@@ -118,7 +118,7 @@ def create_app(scratch=None):
         try:
             payload = request.get_json(silent=True)
             mode = payload.get('payment_mode') if isinstance(payload, dict) else None
-            result = payments.create_payment_intent(payload, mode=mode or 'card')
+            result = payments.create_payment_intent(payload, mode=mode or 'terminal')  # card reader only, as at the kiosk
             photos.bind(payload.get('confirmation_number'))  # this customer's photos now belong to this payment, as at the kiosk
             return jsonify(result)
         except ValueError as exc:
@@ -131,7 +131,7 @@ def create_app(scratch=None):
         except ValueError as exc:
             return jsonify(error=str(exc)), 422
 
-    # ---- server-driven reader: same four routes as the kiosk's scanner_api_BV_CG.py. Stripe carries the payment to the
+    # ---- server-driven reader: same three routes as the kiosk's scanner_api_BV_CG.py. Stripe carries the payment to the
     # reader over the internet, so this works even on networks that block devices from reaching each other ----
     @app.post('/api/payment/reader_start')
     def payment_reader_start():
@@ -156,15 +156,6 @@ def create_app(scratch=None):
             return jsonify(payments.cancel_on_reader(request.get_json(silent=True)))
         except ValueError as exc:
             return jsonify(error=str(exc)), 422
-
-    @app.post('/api/payment/reader_simulate_tap')
-    def payment_reader_simulate_tap():
-        try:
-            payload = request.get_json(silent=True)
-            return jsonify(payments.simulate_tap(payload, payload.get('test_card') if isinstance(payload, dict) else None))
-        except ValueError as exc:
-            return jsonify(error=str(exc)), 422
-
     # ---- monday.com: the same route as the kiosk, photos are queued after the answer ----
     @app.post('/api/monday/create_record')
     def monday_create_record():

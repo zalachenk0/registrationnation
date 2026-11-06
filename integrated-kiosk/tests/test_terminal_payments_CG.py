@@ -1,13 +1,14 @@
 # ============================================================================
 # File:         test_terminal_payments_CG.py
 # Written by:   CG (Cristian Gonzalez)
-# What it does: Tests for the card reader, typed card and Stripe receipt email.
+# What it does: Tests for the card reader (the only way to pay), the refused
+#               typed card, and the Stripe receipt email.
 # Team-written: Logic written by CG (Cristian Gonzalez). Outside code is used
 #               only through the third-party sources listed below.
 # Third-party:  pytest; Stripe Python library; Stripe, Monday.com and CUPS are
 #               replaced by stand-ins in these tests.
 # ============================================================================
-"""S700 reader + typed-card backup: fake Stripe that behaves like Stripe's state machine. No account, key or network."""
+"""S700 reader only (no typed card, no simulator): fake Stripe that behaves like Stripe's state machine. No account, key or network."""
 import time
 
 import pytest
@@ -76,7 +77,7 @@ class FakeStripe:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_unit_fixture')
-    monkeypatch.setenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_unit_fixture')
+    monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY', raising=False)
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_unit_fixture')
     monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
     service = payment.PaymentService(tmp_path / 'payments.sqlite3')
@@ -88,29 +89,39 @@ def env(tmp_path, monkeypatch):
 
 def test_reader_settings_from_env(monkeypatch):
     monkeypatch.delenv('STRIPE_LOCATION_ID', raising=False); monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
-    assert payment.terminal_settings()['enabled'] is False and payment.terminal_settings()['problem'] == ''
+    off = payment.terminal_settings()
+    assert off['enabled'] is False and 'STRIPE_LOCATION_ID' in off['problem']   # [CG] the reason is spelled out now
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_abc123')
     assert payment.terminal_settings() == dict(enabled=True, simulated=False, location='tml_abc123', problem='')
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'not-a-location')
     bad = payment.terminal_settings()
     assert bad['enabled'] is False and 'tml_' in bad['problem']          # typo is explained, never raised
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
-    assert payment.terminal_settings() == dict(enabled=True, simulated=True, location=None, problem='')   # simulator wins
+
+
+@pytest.mark.parametrize('value', ['1', 'true', 'on', 'yes'])
+def test_stripe_simulated_is_ignored_the_physical_reader_is_always_used(monkeypatch, value):
+    monkeypatch.setenv('STRIPE_SIMULATED', value)
+    monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_abc123')
+    assert payment.terminal_settings() == dict(enabled=True, simulated=False, location='tml_abc123', problem='')
+    monkeypatch.delenv('STRIPE_LOCATION_ID')
+    assert payment.terminal_settings()['enabled'] is False                # the simulator no longer turns the reader "on"
 
 
 def test_config_exposes_reader_but_never_secrets(env):
     config = api.app.test_client().get('/api/payment/config')
     assert config.json['terminal'] == dict(enabled=True, simulated=False, location='tml_unit_fixture', problem='')
-    assert 'sk_test' not in config.text
+    assert 'sk_test' not in config.text and 'publishableKey' not in config.json
 
 
-def test_bad_reader_setting_does_not_break_typed_card(env, monkeypatch):
-    payments, stripe_fake = env
+def test_a_bad_reader_setting_is_explained_and_nothing_can_be_charged(env, monkeypatch):
+    payments, fake = env
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'oops')
-    assert payment.configuration()['amount'] == 11425                       # config still works
-    assert payments.create_payment_intent(FORM)['method'] == 'card'         # typed card still works
-    with pytest.raises(payment.PaymentError, match='not set up'):
-        payments.create_payment_intent(FORM, mode='terminal')
+    config = payment.configuration()
+    assert config['terminal']['enabled'] is True and 'tml_' in config['terminal']['problem']   # shown on the reader step
+    for mode in ('terminal', 'card'):
+        with pytest.raises(payment.PaymentError):
+            payments.create_payment_intent(FORM, mode=mode)
+    assert fake.created == []
 
 
 def test_connection_token_needs_header_and_a_reader(env, monkeypatch):
@@ -146,37 +157,69 @@ def test_creating_the_same_terminal_payment_twice_reuses_it(env):
     assert first['id'] == again['id'] and len(fake.intents) == 1 and not fake.canceled
 
 
-# ---------- switching between reader and typed card (the double-charge danger zone) ----------
+# ---------- [CG] the typed card is gone ----------
 
-def test_unpaid_reader_payment_is_replaced_by_typed_card(env):
+def old_typed_card_payment(payments, fake, status='requires_payment_method'):
+    """A typed-card payment left in the ledger from before the card reader became the only way to pay."""
+    reference, fingerprint = payments._identity(FORM)
+    intent = fake.create(amount=11425, currency='usd', payment_method_types=['card'], capture_method='manual',
+                         metadata={'kiosk_reference': reference, 'kiosk_fingerprint': fingerprint},
+                         idempotency_key='kiosk-web-card-create-' + reference)
+    fake.created.clear()
+    intent.status = status
+    db = payments._db()
+    with db:
+        db.execute('INSERT INTO payments VALUES (?, ?, ?, ?)', (reference, fingerprint, intent.id, time.time()))
+    db.close()
+    return intent
+
+
+@pytest.mark.parametrize('mode', ['card', 'typed', '', None, 'TERMINAL'])
+def test_anything_but_the_card_reader_is_refused_and_nothing_is_created(env, mode):
     payments, fake = env
-    terminal = payments.create_payment_intent(FORM, mode='terminal')
-    card = payments.create_payment_intent(FORM, mode='card')
-    assert fake.canceled == [terminal['id']]                                  # the reader's payment was canceled first
-    assert card['id'] != terminal['id'] and card['method'] == 'card'
-    assert fake.created[1]['payment_method_types'] == ['card']
-    assert fake.created[1]['idempotency_key'].endswith('-after-' + terminal['id'])
-    assert fake.intents[terminal['id']].status == 'canceled'
-    assert payments.create_payment_intent(FORM, mode='card')['id'] == card['id']   # and the ledger now follows the new one
+    with pytest.raises(payment.PaymentError, match='turned off'):
+        payments.create_payment_intent(FORM, mode=mode)
+    assert fake.created == []
+    db = payments._db()
+    assert db.execute('SELECT count(*) FROM payments').fetchone()[0] == 0   # not even a ledger row
+    db.close()
 
 
-def test_switching_back_and_forth_never_reuses_an_idempotency_key(env):
+def test_create_intent_route_is_card_reader_only(env):
     payments, fake = env
-    a = payments.create_payment_intent(FORM, mode='terminal')
-    b = payments.create_payment_intent(FORM, mode='card')
-    c = payments.create_payment_intent(FORM, mode='terminal')
-    assert len({a['id'], b['id'], c['id']}) == 3 and c['method'] == 'terminal'
-    keys = [kw['idempotency_key'] for kw in fake.created]
-    assert len(keys) == len(set(keys)) == 3
-    assert fake.canceled == [a['id'], b['id']]
-    assert [i.status for i in fake.intents.values()] == ['canceled', 'canceled', 'requires_payment_method']
+    client = api.app.test_client()
+    refused = client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='card'), headers=HEADERS)
+    assert refused.status_code == 409 and 'turned off' in refused.json['error'] and fake.created == []
+    assert client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='terminal'), headers=HEADERS).json['method'] == 'terminal'
+    assert client.post('/api/payment/create_intent', json=FORM, headers=HEADERS).json['method'] == 'terminal'   # no mode = the reader
+    assert len(fake.created) == 1 and fake.created[0]['payment_method_types'] == ['card_present']
+
+
+def test_an_old_unpaid_typed_card_payment_is_replaced_by_a_reader_payment(env):
+    payments, fake = env
+    old = old_typed_card_payment(payments, fake)
+    reader = payments.create_payment_intent(FORM)
+    assert fake.canceled == [old.id] and reader['id'] != old.id and reader['method'] == 'terminal'
+    assert fake.created[0]['payment_method_types'] == ['card_present']
+    assert fake.created[0]['idempotency_key'].endswith('-after-' + old.id)
+    assert payments.create_payment_intent(FORM)['id'] == reader['id']      # and the ledger now follows the new one
+
+
+def test_an_old_typed_card_payment_that_was_already_approved_is_finished_not_replaced(env):
+    payments, fake = env
+    old = old_typed_card_payment(payments, fake, status='requires_capture')
+    resumed = payments.create_payment_intent(FORM)
+    assert resumed['id'] == old.id and resumed['status'] == 'requires_capture'
+    assert not fake.canceled and fake.created == []                          # no cancel, no second payment
+    assert payments.capture_payment_intent(FORM)['status'] == 'succeeded' and fake.captured == [old.id]
+    assert payments.verify_paid(FORM)['id'] == old.id                        # an old paid receipt can still be reprinted
 
 
 def test_authorized_payment_is_never_replaced_it_is_finished(env):
     payments, fake = env
     terminal = payments.create_payment_intent(FORM, mode='terminal')
     fake.authorize(terminal['id'])                                            # reader took the card
-    resumed = payments.create_payment_intent(FORM, mode='card')               # operator then clicks "typed card instead"
+    resumed = payments.create_payment_intent(FORM, mode='terminal')           # Pay pressed again
     assert resumed['id'] == terminal['id'] and resumed['status'] == 'requires_capture'
     assert not fake.canceled and len(fake.created) == 1                       # no cancel, no second payment
     assert payments.capture_payment_intent(FORM)['status'] == 'succeeded'
@@ -192,47 +235,42 @@ def test_reader_payment_stalled_after_the_card_was_read_restarts_fresh(env):
     assert len(fake.created) == 2 and fake.created[1]['idempotency_key'].endswith('-after-' + first['id'])
 
 
-def test_typed_card_payment_awaiting_confirmation_is_still_resumed(env):
-    payments, fake = env
-    first = payments.create_payment_intent(FORM, mode='card')
-    fake.intents[first['id']].status = 'requires_confirmation'
-    assert payments.create_payment_intent(FORM, mode='card')['id'] == first['id'] and not fake.canceled   # Stripe.js can finish this one
-
-
-def test_paid_payment_cannot_be_switched_or_recharged(env):
+def test_paid_payment_cannot_be_recharged(env):
     payments, fake = env
     terminal = payments.create_payment_intent(FORM, mode='terminal')
     fake.authorize(terminal['id']); payments.capture_payment_intent(FORM)
-    for mode in ('card', 'terminal'):
-        assert payments.create_payment_intent(FORM, mode=mode)['status'] == 'succeeded'
+    for _ in range(2):
+        assert payments.create_payment_intent(FORM, mode='terminal')['status'] == 'succeeded'
     assert len(fake.created) == 1 and not fake.canceled and fake.captured == [terminal['id']]
 
 
-def test_processing_payment_blocks_a_switch(env):
+def test_a_processing_payment_is_never_replaced(env):
     payments, fake = env
-    terminal = payments.create_payment_intent(FORM, mode='terminal')
-    fake.intents[terminal['id']].status = 'processing'
-    assert payments.create_payment_intent(FORM, mode='card')['id'] == terminal['id']
-    assert not fake.canceled and len(fake.created) == 1
+    old = old_typed_card_payment(payments, fake, status='processing')       # money may be moving: leave it alone
+    assert payments.create_payment_intent(FORM, mode='terminal')['id'] == old.id
+    assert not fake.canceled and fake.created == []
 
 
-def test_switch_interrupted_after_cancel_resumes_with_the_same_key(env):
+def test_replacement_interrupted_after_cancel_resumes_with_the_same_key(env):
     payments, fake = env
-    terminal = payments.create_payment_intent(FORM, mode='terminal')
+    old = old_typed_card_payment(payments, fake)
     real_create = fake.create
     calls = {'n': 0}
+    asked = []
     def flaky(**kw):
+        asked.append(kw['idempotency_key'])
         calls['n'] += 1
         if calls['n'] == 1:
             raise stripe.APIConnectionError('lost')
         return real_create(**kw)
     stripe.PaymentIntent.create = flaky
     with pytest.raises(payment.PaymentError):
-        payments.create_payment_intent(FORM, mode='card')                     # canceled the old one, then the network died
-    assert fake.intents[terminal['id']].status == 'canceled'
-    card = payments.create_payment_intent(FORM, mode='card')                  # retry
-    assert fake.canceled == [terminal['id']]                                  # NOT canceled a second time
-    assert card['method'] == 'card' and len(fake.intents) == 2
+        payments.create_payment_intent(FORM, mode='terminal')                 # canceled the old one, then the network died
+    assert fake.intents[old.id].status == 'canceled'
+    reader = payments.create_payment_intent(FORM, mode='terminal')            # retry
+    assert fake.canceled == [old.id]                                          # NOT canceled a second time
+    assert reader['method'] == 'terminal' and len(fake.intents) == 2
+    assert len(asked) == 2 and asked[0] == asked[1]                           # the retry reused the same key
 
 
 def test_externally_canceled_payment_is_simply_replaced(env):
@@ -252,16 +290,7 @@ def test_old_ledger_rows_are_still_refused_after_24h(env):
     db.close()
     fake.intents[next(iter(fake.intents))].status = 'canceled'
     with pytest.raises(payment.PaymentError, match='older payment'):
-        payments.create_payment_intent(FORM, mode='card')
-
-
-def test_create_intent_route_passes_the_payment_mode(env):
-    payments, fake = env
-    client = api.app.test_client()
-    assert client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='terminal'), headers=HEADERS).json['method'] == 'terminal'
-    assert client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='card'), headers=HEADERS).json['method'] == 'card'
-    assert client.post('/api/payment/create_intent', json=FORM, headers=HEADERS).json['method'] == 'card'   # default stays typed card
-    assert len(fake.created) == 2 and fake.canceled == ['pi_fake_1']          # terminal -> card swapped; the last call just resumed
+        payments.create_payment_intent(FORM, mode='terminal')
 
 
 # ---------- receipt email ----------
@@ -269,10 +298,9 @@ def test_create_intent_route_passes_the_payment_mode(env):
 EMAILS = ['jane.sample@example.com', 'a@b.co']
 
 
-@pytest.mark.parametrize('mode', ['terminal', 'card'])
-def test_receipt_email_is_set_just_before_capture_for_reader_and_typed_card(env, mode):
+def test_receipt_email_is_set_just_before_capture(env):
     payments, fake = env
-    intent = payments.create_payment_intent(FORM, mode=mode)
+    intent = payments.create_payment_intent(FORM, mode='terminal')
     fake.authorize(intent['id'])
     result = payments.capture_payment_intent(dict(FORM, receipt_email='  Jane.Sample@Example.com '))
     assert fake.events == ['modify', 'capture']                              # email first, then the money, in that order
@@ -298,7 +326,7 @@ def test_a_missing_or_bad_email_never_blocks_the_payment(env, bad):
 
 def test_a_stripe_problem_while_attaching_the_email_never_blocks_the_payment(env):
     payments, fake = env
-    intent = payments.create_payment_intent(FORM, mode='card')
+    intent = payments.create_payment_intent(FORM, mode='terminal')
     fake.authorize(intent['id'])
     fake.modify_error = stripe.APIConnectionError('lost')
     result = payments.capture_payment_intent(dict(FORM, receipt_email=EMAILS[0]))

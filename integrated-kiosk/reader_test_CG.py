@@ -58,6 +58,10 @@ def simulated_is_on() -> bool:
     return os.getenv("STRIPE_SIMULATED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_simulated(reader) -> bool:  # [CG] Stripe's pretend reader. The kiosk never uses one, so neither does this tool
+    return str(reader.get("device_type") or "").startswith("simulated")
+
+
 def say(text: str = "") -> None:
     print(text)
 
@@ -76,12 +80,11 @@ def check() -> int:
     location_id = configured_location()
     say("\nWhat the kiosk is set to do (from .env):")
     if simulated_is_on():
-        say("  STRIPE_SIMULATED is ON, so the kiosk uses Stripe's FAKE reader and ignores STRIPE_LOCATION_ID.")
-        say("  Set STRIPE_SIMULATED=0 (or delete the line) to use the real S700.")
-    elif location_id:
-        say(f"  The kiosk will look for a real reader at location {location_id}.")
+        say("  STRIPE_SIMULATED is set, but it is no longer used: the kiosk only uses the physical S700. You can delete that line.")
+    if location_id:
+        say(f"  The kiosk will look for the physical reader at location {location_id}.")
     else:
-        say("  Neither STRIPE_SIMULATED nor STRIPE_LOCATION_ID is set, so the kiosk uses the typed-card form only.")
+        say("  STRIPE_LOCATION_ID is not set, so the kiosk can't take payments (the card reader is the only way to pay).")
 
     locations = stripe.terminal.Location.list(limit=20).data  # [3RD PARTY: Stripe API]
     say("\nLocations on this Stripe account (Dashboard > Terminal > Locations):")
@@ -100,17 +103,17 @@ def check() -> int:
     online_here = []
     for reader in readers:
         here = reader.location == location_id if location_id else False
-        if reader.status == "online" and here:
+        if reader.status == "online" and here and not is_simulated(reader):
             online_here.append(reader)
         label = reader.label or "(no name)"
-        say(f"  {reader.id}   {label:<22} {reader.device_type:<22} {reader.status:<8} ip {reader.ip_address or '?':<15}"
-            + ("   <-- at the kiosk's location" if here else ""))
+        note = "   (Stripe's simulated reader: the kiosk ignores it)" if is_simulated(reader) else ("   <-- at the kiosk's location" if here else "")
+        say(f"  {reader.id}   {label:<22} {reader.device_type:<22} {reader.status:<8} ip {reader.ip_address or '?':<15}" + note)
     say()
     if online_here:
-        say(f"READY: {len(online_here)} reader(s) online at the kiosk's location. Next:  python3 reader_test_CG.py pay")
+        say(f"READY: {len(online_here)} physical reader(s) online at the kiosk's location. Next:  python3 reader_test_CG.py pay")
         return 0
     if readers and location_id:
-        say("NOT READY: no reader is both ONLINE and at STRIPE_LOCATION_ID.")
+        say("NOT READY: no physical reader is both ONLINE and at STRIPE_LOCATION_ID.")
         say("  Offline: check the reader's power and Wi-Fi/Ethernet, and give it a minute after it starts.")
         say("  Wrong location: re-register it under the right location, or change STRIPE_LOCATION_ID.")
     return 1
@@ -144,9 +147,13 @@ def pick_reader() -> stripe.terminal.Reader:  # [3RD PARTY: Stripe API]
     if not location_id:
         raise ToolError("Set STRIPE_LOCATION_ID in .env first. Run  python3 reader_test_CG.py check  to see your locations.")
     readers = stripe.terminal.Reader.list(location=location_id, limit=20).data  # [3RD PARTY: Stripe API]
-    online = [reader for reader in readers if reader.status == "online"]
+    online = [reader for reader in readers if reader.status == "online" and not is_simulated(reader)]  # [CG] physical only
+    wanted = os.getenv("STRIPE_READER_ID", "").strip()
+    if wanted:
+        online = [reader for reader in online if reader.id == wanted]  # the same one the kiosk charges on
     if not online:
-        raise ToolError(f"No reader is online at {location_id}. Run  python3 reader_test_CG.py check  to see what Stripe can see.")
+        raise ToolError(f"No physical reader is online at {location_id}" + (f" with id {wanted}" if wanted else "")
+                        + ". Run  python3 reader_test_CG.py check  to see what Stripe can see.")
     return online[0]
 
 

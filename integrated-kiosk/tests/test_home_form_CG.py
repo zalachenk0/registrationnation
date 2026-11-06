@@ -65,8 +65,9 @@ def home_test(tmp_path, monkeypatch):
     for name in ('KIOSK_PROBLEM_LOG', 'KIOSK_LICENSE_PHOTO_DIR', 'KIOSK_INSURANCE_PHOTO_DIR'):
         monkeypatch.setenv(name, 'restored-after-the-test')          # create_app changes these three, so the test puts them back afterwards
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_unit_fixture')
-    monkeypatch.setenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_unit_fixture')
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
+    monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY', raising=False)
+    monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_unit_fixture')  # [CG] the physical reader is the only way to pay
+    monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
     monkeypatch.setenv('MONDAY_LICENSE_PHOTO_COLUMN', 'files_license')
     monkeypatch.setenv('MONDAY_INSURANCE_PHOTO_COLUMN', 'files_insurance')
     monkeypatch.delenv('KIOSK_KEEP_LOCAL_PHOTOS', raising=False)
@@ -163,15 +164,28 @@ def test_the_setup_check_never_reveals_keys_or_paths(home_test, monkeypatch):
     body = home_test.client.get('/api/home/settings').get_data(as_text=True)
     assert 'monday-secret-token-value' not in body and 'sk_test_unit_fixture' not in body and 'pk_test_unit_fixture' not in body and str(home_test.scratch) not in body
     data = home_test.client.get('/api/home/settings').get_json()
-    assert data['stripeKeys'] and data['monday'] and data['licenseColumn'] and data['insuranceColumn'] and data['reader'] == 'simulated' and data['liveKeyFound'] is False
+    assert data['stripeKeys'] and data['monday'] and data['licenseColumn'] and data['insuranceColumn'] and data['reader'] == 'real' and data['liveKeyFound'] is False
 
 
 def test_a_live_stripe_key_is_flagged_and_payments_refused(home_test, monkeypatch):
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_live_not_a_real_key')
     assert home_test.client.get('/api/home/settings').get_json()['liveKeyFound'] is True
-    r = home_test.client.post('/api/payment/create_intent', json={**FORM, 'payment_mode': 'card'}, headers=HEADERS)
+    r = home_test.client.post('/api/payment/create_intent', json={**FORM, 'payment_mode': 'terminal'}, headers=HEADERS)
     assert r.status_code == 409 and 'test' in r.get_json()['error'].lower()
     assert not home_test.stripe.intents
+
+
+def test_the_home_form_is_card_reader_only_too(home_test, monkeypatch):
+    """[CG] same rules as the kiosk: no typed card, no simulator, and the page doesn't load Stripe.js at all."""
+    r = home_test.client.post('/api/payment/create_intent', json={**FORM, 'payment_mode': 'card'}, headers=HEADERS)
+    assert r.status_code == 409 and 'turned off' in r.get_json()['error'] and not home_test.stripe.intents
+    r = home_test.client.post('/api/payment/create_intent', json=FORM, headers=HEADERS)  # no mode at all: the reader, as at the kiosk
+    assert r.status_code == 200 and r.get_json()['method'] == 'terminal'
+    assert home_test.client.post('/api/payment/reader_simulate_tap', json=FORM, headers=HEADERS).status_code in (404, 405)
+    monkeypatch.setenv('STRIPE_SIMULATED', '1')
+    assert home_test.client.get('/api/home/settings').get_json()['reader'] == 'real'
+    page = home_test.client.get('/').get_data(as_text=True)
+    assert 'js.stripe.com/v3' not in page and 'Typed card' not in page and 'simCard' not in page and 'Pretend' not in page
 
 
 def test_the_photo_status_route_ignores_odd_references(home_test):

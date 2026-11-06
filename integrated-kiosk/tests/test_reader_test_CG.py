@@ -101,6 +101,7 @@ def fake(monkeypatch):
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_abc123')
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_1')
     monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
+    monkeypatch.delenv('STRIPE_READER_ID', raising=False)
     return stripe
 
 
@@ -140,11 +141,34 @@ def test_check_reports_ready_when_a_reader_is_online_at_the_kiosks_location(fake
     assert 'READY' in out and 'tmr_1' in out and 'Kiosk S700' in out and 'the kiosk uses this one' in out and fake.api_key == 'sk_test_abc123'
 
 
-def test_check_warns_loudly_that_simulated_mode_hides_the_real_reader(fake, monkeypatch, capsys):
+def test_check_says_stripe_simulated_is_no_longer_used(fake, monkeypatch, capsys):
     monkeypatch.setenv('STRIPE_SIMULATED', '1')
-    run('check')
+    assert run('check') == 0                                  # [CG] the physical reader is still found and ready
     out = capsys.readouterr().out
-    assert 'FAKE reader' in out and 'STRIPE_SIMULATED=0' in out
+    assert 'no longer used' in out and 'physical S700' in out and 'READY' in out
+
+
+def test_check_never_counts_stripes_simulated_reader_as_ready(fake, capsys):
+    fake.readers = [Obj(id='tmr_sim', label='Pretend', device_type='simulated_stripe_s700', status='online', ip_address=None, location='tml_1')]
+    assert run('check') == 1
+    out = capsys.readouterr().out
+    assert 'kiosk ignores it' in out and 'NOT READY' in out
+
+
+def test_pay_never_uses_the_simulated_reader_even_if_it_is_listed_first(fake, capsys):
+    fake.readers.insert(0, Obj(id='tmr_sim', label='Pretend', device_type='simulated_stripe_s700', status='online', ip_address=None, location='tml_1'))
+    assert run('pay') == 0
+    assert [entry[1] for entry in fake.log if entry[0] == 'send'] == ['tmr_1']
+
+
+def test_pay_uses_the_reader_named_in_stripe_reader_id(fake, monkeypatch, capsys):
+    fake.readers.append(Obj(id='tmr_2', label='Spare S700', device_type='stripe_s700', status='online', ip_address=None, location='tml_1'))
+    monkeypatch.setenv('STRIPE_READER_ID', 'tmr_2')
+    assert run('pay') == 0
+    assert [entry[1] for entry in fake.log if entry[0] == 'send'] == ['tmr_2']
+    monkeypatch.setenv('STRIPE_READER_ID', 'tmr_gone')
+    fake.log.clear()
+    assert run('pay') == 1 and 'with id tmr_gone' in capsys.readouterr().out and fake.log == []
 
 
 def test_check_spots_an_offline_reader(fake, capsys):
@@ -170,7 +194,7 @@ def test_check_with_nothing_set_up_yet_points_to_the_next_step(fake, monkeypatch
     fake.locations, fake.readers = [], []
     run('check')
     out = capsys.readouterr().out
-    assert 'typed-card form only' in out and 'Create one in the Dashboard' in out and 'register' in out
+    assert "can't take payments" in out and 'Create one in the Dashboard' in out and 'register' in out
 
 
 # ---------- register ----------
@@ -218,7 +242,7 @@ def test_silly_amounts_are_refused_before_anything_is_created(fake, capsys, amou
 
 def test_no_online_reader_stops_before_a_payment_is_even_created(fake, capsys):
     fake.readers[0]['status'] = 'offline'
-    assert run('pay') == 1 and fake.log == [] and 'No reader is online' in capsys.readouterr().out
+    assert run('pay') == 1 and fake.log == [] and 'No physical reader is online' in capsys.readouterr().out
 
 
 def test_a_declined_card_is_explained_and_nothing_is_left_hanging(fake, capsys):
