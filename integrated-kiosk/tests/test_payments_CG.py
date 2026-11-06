@@ -30,14 +30,16 @@ HEADERS = {'X-Kiosk-Payment': '1'}
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_unit_fixture')
-    monkeypatch.setenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_unit_fixture')
+    monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_unit_fixture')  # [CG] the card reader is the only way to pay
+    monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY', raising=False)    # not needed any more (it was only for the typed card)
+    monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
     service = payment.PaymentService(tmp_path / 'payments.sqlite3')
     monkeypatch.setattr(api, 'payments', service)
     reference, fingerprint = service._identity(FORM)
     intent = stripe.PaymentIntent.construct_from(dict(id='pi_test_fixture', client_secret='pi_test_fixture_secret_fake',
         amount=11425, amount_received=0, currency='usd', livemode=False,
         metadata={'kiosk_reference': reference, 'kiosk_fingerprint': fingerprint},
-        payment_method_types=['card'], status='requires_payment_method'), 'sk_test_unit_fixture')
+        payment_method_types=['card_present'], status='requires_payment_method'), 'sk_test_unit_fixture')
     create = Mock(return_value=intent)
     retrieve = Mock(return_value=intent)
     def capture(*args, **kwargs):
@@ -59,7 +61,7 @@ def test_fixed_amount_same_intent_survives_restart(service):
     assert create.call_count == 1
     assert create.call_args.kwargs['amount'] == 11425
     assert create.call_args.kwargs['capture_method'] == 'manual'
-    assert create.call_args.kwargs['payment_method_types'] == ['card']
+    assert create.call_args.kwargs['payment_method_types'] == ['card_present']
     assert 'receipt_email' not in create.call_args.kwargs
     with pytest.raises(payment.PaymentError, match='original'):
         payments.create_payment_intent(dict(FORM, vin='1HGCM82633A004353'))
@@ -77,16 +79,6 @@ def test_capture_retries_after_lost_response_do_not_capture_twice(service):
         payments.capture_payment_intent(FORM)
     assert payment.PaymentService(payments.database).capture_payment_intent(FORM)['status'] == 'succeeded'
     assert capture.call_count == 1
-
-
-def test_confirmation_recovery_returns_same_sdk_intent(service):
-    payments, intent, create, _, _ = service
-    payments.create_payment_intent(FORM)
-    intent.status = 'requires_confirmation'
-    recovered = payments.create_payment_intent(FORM)
-    assert recovered['paymentIntent']['id'] == intent.id
-    assert recovered['paymentIntent']['client_secret'] == intent.client_secret
-    assert create.call_count == 1
 
 
 def test_create_retry_uses_same_idempotency_key_and_old_unknown_is_blocked(service):
@@ -162,21 +154,29 @@ def test_payment_api_validation_and_secret_handling(service, monkeypatch):
     assert client.get('/.env').status_code == 404
     assert client.get('/runtime/payments.sqlite3').status_code == 404
     config = client.get('/api/payment/config')
-    assert config.json['testMode'] and config.json['publishableKey'] == 'pk_test_unit_fixture'
+    assert config.json['testMode'] and 'publishableKey' not in config.json
     assert 'sk_test' not in config.text
+    # [CG] a key problem no longer breaks the page: it's shown on the card reader step, and nothing can be charged
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_live_not_a_real_key')
-    assert client.get('/api/payment/config').status_code == 409
+    live = client.get('/api/payment/config')
+    assert live.status_code == 200 and live.json['serverReader']['enabled'] is False and 'test keys only' in live.json['serverReader']['problem']
+    assert 'sk_live' not in live.text
+    assert client.post('/api/payment/create_intent', json=FORM, headers=HEADERS).status_code == 409
     monkeypatch.delenv('STRIPE_SECRET_KEY')
-    assert client.get('/api/payment/config').status_code == 409
+    missing = client.get('/api/payment/config')
+    assert missing.status_code == 200 and 'secret key' in missing.json['serverReader']['problem']
 
 
-def test_publishable_key_required_and_reader_settings_ignored(service, monkeypatch):
-    monkeypatch.setenv('STRIPE_SIMULATED', 'false')
-    monkeypatch.delenv('STRIPE_LOCATION_ID', raising=False)
-    assert payment.configuration()['amount'] == 11425
-    monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY')
-    with pytest.raises(payment.PaymentError, match='STRIPE_PUBLISHABLE_KEY'):
-        payment.configuration()
-    monkeypatch.setenv('STRIPE_PUBLISHABLE_KEY', 'pk_live_not_real')
-    with pytest.raises(payment.PaymentError):
-        payment.configuration()
+def test_config_never_raises_and_always_opens_the_card_reader_step(service, monkeypatch):
+    """[CG] The card reader is the only way to pay, so the form must always land on the card reader step (never the old
+    typed-card form). terminal.enabled is always True; any setup problem rides along and shows on that step."""
+    monkeypatch.delenv('STRIPE_LOCATION_ID')
+    config = payment.configuration()
+    assert config['amount'] == 11425 and 'publishableKey' not in config
+    assert config['terminal']['enabled'] is True and config['terminal']['simulated'] is False
+    assert config['serverReader']['enabled'] is False and 'STRIPE_LOCATION_ID' in config['terminal']['problem']
+    monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_unit_fixture')
+    config = payment.configuration()
+    assert config['serverReader'] == dict(enabled=True, simulated=False, problem='') and config['terminal']['problem'] == ''
+    monkeypatch.setenv('STRIPE_SECRET_KEY', 'REPLACE_ME')
+    assert payment.configuration()['terminal']['enabled'] is True  # still the reader step, with the key problem on it

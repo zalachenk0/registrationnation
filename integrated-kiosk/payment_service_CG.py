@@ -1,8 +1,8 @@
 # ============================================================================
 # File:         payment_service_CG.py
 # Written by:   CG (Cristian Gonzalez)
-# What it does: Creates, captures and verifies Stripe payments (reader and typed
-#               card), with a local ledger that prevents double charges. Also
+# What it does: Creates, captures and verifies Stripe payments on the S700 card
+#               reader, with a local ledger that prevents double charges. Also
 #               runs the reader the server-driven way (Stripe carries the
 #               payment to the reader, so no local network link is needed).
 # Team-written: All logic written by CG (Cristian Gonzalez), except the lines
@@ -30,7 +30,10 @@ import stripe
 from printing_BV import validate
 
 AMOUNT_CENTS = 11425
-METHODS = {'card', 'card_present'}  # typed card (Payment Element) and the S700 reader (Terminal)
+# [CG] the S700 card reader is the kiosk's only way to pay. The kiosk has no keyboard for typing a card, so new payments
+# are always card_present. 'card' stays accepted here only so a typed-card payment from before this change still
+# matches the ledger (a reprint of an old receipt), never so a new one can be made
+METHODS = {'card', 'card_present'}
 # nothing has been authorized in these states, so a payment sitting in one of them can safely be replaced
 UNPAID = {'requires_payment_method', 'requires_confirmation', 'requires_action'}
 
@@ -59,51 +62,50 @@ def clean_email(value):
     return email if len(email) <= 254 and EMAIL.fullmatch(email) else None
 
 
-# S700 reader settings from .env. This never raises, so a typo here can't break the typed-card backup
+# S700 reader settings from .env. This never raises, so a typo here shows up as a message on the card reader step.
+# [CG] only the physical reader is used: STRIPE_SIMULATED is ignored, and 'simulated' is always False. The key stays in
+# the answer because today's compiled kiosk form (dist/) reads it
 def terminal_settings():
-    simulated = os.getenv('STRIPE_SIMULATED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
     location = os.getenv('STRIPE_LOCATION_ID', '').strip()
-    if simulated:
-        return dict(enabled=True, simulated=True, location=None, problem='')
     if location.startswith('tml_'):
         return dict(enabled=True, simulated=False, location=location, problem='')
-    problem = 'STRIPE_LOCATION_ID should look like tml_... (Stripe Dashboard > Terminal > Locations).' if location else ''
+    problem = ('STRIPE_LOCATION_ID should look like tml_... (Stripe Dashboard > Terminal > Locations).' if location else
+               'The card reader is not set up: add STRIPE_LOCATION_ID=tml_... to .env (Stripe Dashboard > Terminal > Locations).')
     return dict(enabled=False, simulated=False, location=None, problem=problem)
 
 
 def configuration():
-    _client()
-    public_key = os.getenv('STRIPE_PUBLISHABLE_KEY', '').strip()
-    if not public_key.startswith('pk_test_') or 'REPLACE' in public_key:
-        raise PaymentError('Add STRIPE_PUBLISHABLE_KEY=pk_test_... to .env from the same Stripe test account as your secret key, then restart.')
-    return dict(publishableKey=public_key, amount=AMOUNT_CENTS, currency='usd', testMode=True, terminal=terminal_settings(),
-                serverReader=server_reader_settings())
+    """What the kiosk form needs to show the payment step. [CG] Never raises: the card reader is the only way to pay, so
+    any setup problem (keys, location, reader id) is shown on the card reader step instead of breaking the page.
+    terminal.enabled is always True so the form always opens the card reader step; serverReader says whether it can work."""
+    reader = server_reader_settings()
+    try:
+        _client()
+    except PaymentError as exc:
+        reader = dict(enabled=False, simulated=False, problem=str(exc))
+    location = os.getenv('STRIPE_LOCATION_ID', '').strip()
+    return dict(amount=AMOUNT_CENTS, currency='usd', testMode=True, serverReader=reader,
+                terminal=dict(enabled=True, simulated=False, location=location if location.startswith('tml_') else None,
+                              problem=reader['problem']))
 
 
 # ---- [CG] server-driven reader: the kiosk asks Stripe to put the payment on the reader, and Stripe talks to the reader over
 # the internet. The kiosk and the reader never talk to each other directly, so the local DNS answers and the device-to-device
 # traffic that campus Wi-Fi tends to block stop mattering. Approach follows Stripe's server-driven Terminal guide
 # (docs.stripe.com/terminal/payments/setup-integration?terminal-sdk-platform=server-driven) ----
-SIMULATED_READER_CODE = 'simulated-s700'  # [3RD PARTY: Stripe API] special code that makes a pretend S700 (test mode only)
-SIMULATED_CARDS = {'4242424242424242', '4000000000000002', '4000000000009995'}  # Stripe's test cards: approved, declined, no funds
 _readers = {}  # reader picked for each set of settings, so every status check doesn't list the readers again
 
 
 def server_reader_settings():
-    """Same never-raises promise as terminal_settings(). Server-driven needs a location even when simulated,
-    because Stripe's pretend server-driven reader is a real reader object that lives at a location."""
+    """Same never-raises promise as terminal_settings()."""
     reader = terminal_settings()
-    location = os.getenv('STRIPE_LOCATION_ID', '').strip()
     wanted = os.getenv('STRIPE_READER_ID', '').strip()
     if not reader['enabled']:
         return dict(enabled=False, simulated=False, problem=reader['problem'])
-    if not location.startswith('tml_'):
-        return dict(enabled=False, simulated=reader['simulated'],
-                    problem='The server-driven reader needs STRIPE_LOCATION_ID=tml_... in .env, even for the simulated reader.')
     if wanted and not wanted.startswith('tmr_'):
-        return dict(enabled=False, simulated=reader['simulated'],
+        return dict(enabled=False, simulated=False,
                     problem='STRIPE_READER_ID should look like tmr_... (Stripe Dashboard > Terminal > Readers), or leave it out.')
-    return dict(enabled=True, simulated=reader['simulated'], problem='')
+    return dict(enabled=True, simulated=False, problem='')
 
 
 def _is_simulated(reader):
@@ -116,37 +118,33 @@ def _location_of(reader):
 
 
 def find_reader():
-    """The reader id this kiosk charges on. Refuses to guess: a payment must never pop up on some other kiosk's reader."""
+    """The reader id this kiosk charges on. Refuses to guess: a payment must never pop up on some other kiosk's reader.
+    [CG] Only a physical reader is ever used. Stripe's simulated reader is skipped, even when one is still registered
+    at the same location from earlier testing."""
     _client()
     settings = server_reader_settings()
     if not settings['enabled']:
-        raise PaymentError(settings['problem'] or 'The card reader is not set up on this kiosk. Use the typed-card option.')
+        raise PaymentError(settings['problem'] or 'The card reader is not set up on this kiosk.')
     location = os.getenv('STRIPE_LOCATION_ID', '').strip()
     wanted = os.getenv('STRIPE_READER_ID', '').strip()
-    key = (settings['simulated'], location, wanted)
+    key = (location, wanted)
     if key in _readers:
         return _readers[key]
-    simulated = settings['simulated']
     try:
         if wanted:
             reader = stripe.terminal.Reader.retrieve(wanted)  # [3RD PARTY: Stripe API]
             if _location_of(reader) != location:
                 raise PaymentError('STRIPE_READER_ID is registered to a different location than STRIPE_LOCATION_ID. Fix .env.')
-            if _is_simulated(reader) != simulated:
-                raise PaymentError('STRIPE_READER_ID is a simulated reader but STRIPE_SIMULATED is off (or the other way around). Fix .env.'
-                                   if _is_simulated(reader) else
-                                   'STRIPE_READER_ID is a real reader but STRIPE_SIMULATED is on (or the other way around). Fix .env.')
+            if _is_simulated(reader):
+                raise PaymentError('STRIPE_READER_ID is Stripe\'s simulated reader. This kiosk only uses the physical S700: '
+                                   'put its tmr_... id in .env, or leave STRIPE_READER_ID out.')
         else:
             found = [r for r in stripe.terminal.Reader.list(location=location, limit=100).data  # [3RD PARTY: Stripe API]
-                     if _is_simulated(r) == simulated]
-            if simulated and not found:
-                reader = stripe.terminal.Reader.create(  # [3RD PARTY: Stripe API] makes Stripe's pretend S700, once
-                    registration_code=SIMULATED_READER_CODE, location=location, label='Registration Nation simulated S700',
-                    idempotency_key='kiosk-simulated-reader-' + location)
-            elif not found:
-                raise PaymentError('No card reader is registered at this location. Run "reader_test_CG.py check" to see what Stripe has.')
-            elif simulated or len(found) == 1:
-                reader = found[0]  # every simulated reader is the same pretend device, any one of them works
+                     if not _is_simulated(r)]
+            if not found:
+                raise PaymentError('No physical card reader is registered at this location. Run "reader_test_CG.py check" to see what Stripe has.')
+            elif len(found) == 1:
+                reader = found[0]
             else:
                 online = [r for r in found if r.get('status') == 'online']
                 if len(online) != 1:
@@ -159,6 +157,18 @@ def find_reader():
     return reader.id
 
 
+def reader_working_on(intent_id):
+    """True only when the server-driven reader is busy with this exact payment. Never raises: if Stripe can't be asked,
+    the answer is False and the older behavior applies."""
+    try:
+        if not server_reader_settings()['enabled']:
+            return False
+        action = _action_for(stripe.terminal.Reader.retrieve(find_reader()), intent_id)  # [3RD PARTY: Stripe API]
+        return bool(action and action.get('status') == 'in_progress')
+    except Exception:
+        return False
+
+
 def _reader_problem(exc):
     """Turns Stripe's reader error codes into something a customer or operator can act on. Nothing is charged by a failed send."""
     code = getattr(exc, 'code', None) or ''
@@ -169,6 +179,12 @@ def _reader_problem(exc):
     if code == 'terminal_reader_timeout':
         return 'The card reader did not answer in time. Press Pay again; this same payment is checked first, so it cannot charge twice.'
     return 'Stripe could not send the payment to the card reader. Press Pay again; nothing has been charged.'
+
+
+def intent_only(payload):
+    """True for {'payment_intent': 'pi_...'}. Today's compiled kiosk form only holds the payment's secret at the card step,
+    not the form, so dist/stripe-terminal-server_CG.js asks by payment id instead"""
+    return isinstance(payload, dict) and set(payload) == {'payment_intent'}
 
 
 def _action_for(reader, intent_id):
@@ -185,7 +201,7 @@ def _action_for(reader, intent_id):
 def create_connection_token():
     _client()
     if not terminal_settings()['enabled']:
-        raise PaymentError('The card reader is not set up on this kiosk. Use the typed-card option.')
+        raise PaymentError(terminal_settings()['problem'] or 'The card reader is not set up on this kiosk.')
     try:
         return stripe.terminal.ConnectionToken.create().secret  # [3RD PARTY: Stripe API]
     except stripe.StripeError as exc:
@@ -258,12 +274,16 @@ class PaymentService:
                     receiptEmail=intent.get('receipt_email'),
                     paymentIntent=dict(intent) if intent.status == 'requires_confirmation' else None)
 
-    def create_payment_intent(self, payload, mode='card'):
+    def create_payment_intent(self, payload, mode='terminal'):
         reference, fingerprint = self._identity(payload)
-        settings = configuration()['terminal']
-        mode = 'terminal' if mode == 'terminal' else 'card'
-        if mode == 'terminal' and not settings['enabled']:
-            raise PaymentError('The card reader is not set up on this kiosk. Use the typed-card option.')
+        # [CG] card reader only. A typed card can't be entered without a keyboard, so it's refused here and not just
+        # hidden on the form: nothing can start one by mistake
+        if mode != 'terminal':
+            raise PaymentError('Typed card payments are turned off on this kiosk. Pay with the card reader.')
+        _client()
+        settings = terminal_settings()
+        if not settings['enabled']:
+            raise PaymentError(settings['problem'] or 'The card reader is not set up on this kiosk.')
         with self.lock:
             db = self._db()
             try:
@@ -282,6 +302,10 @@ class PaymentService:
                         stalled_reader = mode == 'terminal' and current.status == 'requires_confirmation'
                         # a payment on the method that was asked for, or one that already moved money, is simply resumed
                         if (self._method(current) == mode and not stalled_reader) or current.status not in UNPAID:
+                            return self._result(current)
+                        # [CG] ...and so is one the server-driven reader is in the middle of. Canceling it mid-approval could
+                        # leave the customer's card held for a payment the kiosk then throws away
+                        if self._method(current) == 'terminal' and reader_working_on(current.id):
                             return self._result(current)
                         # the other method was started but nothing was authorized, so it is safe to replace
                         stripe.PaymentIntent.cancel(current.id, idempotency_key='kiosk-cancel-' + current.id)  # [3RD PARTY: Stripe API]
@@ -355,7 +379,21 @@ class PaymentService:
         return answer
 
     def _ours(self, payload):
-        """This transaction's reader payment, checked against the ledger and the form, plus the reader it belongs on."""
+        """This transaction's reader payment, checked against the ledger and the form, plus the reader it belongs on.
+        Asked by payment id instead, the payment must be one this kiosk's ledger started (never just any id)."""
+        if intent_only(payload):
+            intent_id = payload['payment_intent']
+            if not isinstance(intent_id, str) or not intent_id.startswith('pi_'):  # the ledger lookup below is the real check
+                raise PaymentError('That is not a payment this kiosk started.')
+            reader_id = find_reader()
+            db = self._db()
+            try:
+                row = db.execute('SELECT * FROM payments WHERE intent_id=?', (intent_id,)).fetchone()
+            finally:
+                db.close()
+            if not row:
+                raise PaymentError('That is not a payment this kiosk started.')
+            return reader_id, row
         reference, fingerprint = self._identity(payload)
         reader_id = find_reader()
         db = self._db()
@@ -379,8 +417,15 @@ class PaymentService:
                         action = _action_for(stripe.terminal.Reader.retrieve(reader_id), current.id)  # [3RD PARTY: Stripe API]
                         if action and action.get('status') == 'in_progress':
                             return self._reader_answer(current, 'waiting')
-                # same create step as the browser-SDK reader: reuses this transaction's payment, or makes the one and only new one
-                created = self.create_payment_intent(payload, mode='terminal')  # already checked against this form inside
+                if intent_only(payload):
+                    # the built screen already made (or reused) the payment with create_intent; only send it
+                    current = self._retrieve(row)
+                    if self._method(current) != 'terminal':
+                        raise PaymentError('This payment was not started for the card reader. Press Pay to start again.')
+                    created = self._result(current)
+                else:
+                    # same create step as the browser-SDK reader: reuses this transaction's payment, or makes the one and only new one
+                    created = self.create_payment_intent(payload, mode='terminal')  # already checked against this form inside
                 if created['status'] in ('requires_capture', 'succeeded'):
                     return self._reader_answer(created, 'approved')
                 if created['status'] == 'processing':  # Stripe is finishing an approval right now, so just keep checking
@@ -433,24 +478,3 @@ class PaymentService:
                 return self.reader_status(payload)
             except stripe.StripeError as exc:
                 raise PaymentError('The card reader could not be canceled from here. Touch Cancel on the reader itself.') from exc
-
-    def simulate_tap(self, payload, card_number):
-        """Test mode only: pretends a card was tapped on Stripe's simulated reader. Refused for a real reader."""
-        _client()
-        if not server_reader_settings()['simulated']:
-            raise PaymentError('Pretend taps only work with the simulated reader (STRIPE_SIMULATED=1).')
-        card = re.sub(r'\D', '', str(card_number or ''))
-        if card not in SIMULATED_CARDS:
-            raise PaymentError('Use one of Stripe\'s test cards for a pretend tap.')
-        with self.lock:
-            try:
-                reader_id, row = self._ours(payload)
-                intent = self._retrieve(row)
-                action = _action_for(stripe.terminal.Reader.retrieve(reader_id), intent.id)  # [3RD PARTY: Stripe API]
-                if not action or action.get('status') != 'in_progress':
-                    raise PaymentError('The simulated reader is not asking for this payment. Press Pay first.')
-                stripe.terminal.Reader.TestHelpers.present_payment_method(  # [3RD PARTY: Stripe API] test helper
-                    reader_id, type='card_present', card_present={'number': card})
-                return self.reader_status(payload)
-            except stripe.StripeError as exc:
-                raise PaymentError('Stripe did not accept the pretend tap. Press Pay again to check the payment.') from exc

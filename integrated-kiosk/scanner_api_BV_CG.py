@@ -31,7 +31,7 @@ from camera_service_BV_SL import Camera, CameraError
 from extraction_service_BV_SL import scan_license, scan_insurance, scan_registration
 from kiosk_scanners_SL.results_SL import ScannerError
 from printing_BV import PrintService, PrintError, create_pdf, printer_status
-from payment_service_CG import PaymentService, PaymentError, configuration, create_connection_token
+from payment_service_CG import PaymentService, PaymentError, configuration, create_connection_token, intent_only
 from monday_service_CG import MondayError, create_monday_record
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -260,8 +260,8 @@ def payment_started(payload):
 def payment_create_intent():
     try:
         payload = request.get_json(silent=True)
-        mode = payload.get('payment_mode') if isinstance(payload, dict) else None  # 'terminal' (S700) or 'card' (typed)
-        result = payments.create_payment_intent(payload, mode=mode or 'card')
+        mode = payload.get('payment_mode') if isinstance(payload, dict) else None  # [CG] only 'terminal' (S700) is accepted
+        result = payments.create_payment_intent(payload, mode=mode or 'terminal')
         payment_started(payload)
         return jsonify(result)
     except ValueError as exc:
@@ -283,13 +283,14 @@ def payment_connection_token():
 
 
 # ---- [CG] server-driven reader: Stripe carries the payment to the reader over the internet, so the kiosk and the reader
-# never have to reach each other on the local network. All four sit behind the X-Kiosk-Payment check above ----
+# never have to reach each other on the local network. All three sit behind the X-Kiosk-Payment check above ----
 @app.post('/api/payment/reader_start')
 def payment_reader_start():
     try:
         payload = request.get_json(silent=True)
         result = payments.start_on_reader(payload)
-        payment_started(payload)
+        if not intent_only(payload):  # by payment id (today's built screen) means create_intent already did these steps
+            payment_started(payload)
         return jsonify(result)
     except ValueError as exc:
         return jsonify(error=str(exc)), 422
@@ -307,17 +308,6 @@ def payment_reader_status():
 def payment_reader_cancel():
     try:
         return jsonify(payments.cancel_on_reader(request.get_json(silent=True)))
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 422
-
-
-# test mode only (payment_service_CG refuses it for a real reader): pretends a Stripe test card was tapped
-@app.post('/api/payment/reader_simulate_tap')
-def payment_reader_simulate_tap():
-    try:
-        payload = request.get_json(silent=True)
-        card = payload.get('test_card') if isinstance(payload, dict) else None
-        return jsonify(payments.simulate_tap(payload, card))
     except ValueError as exc:
         return jsonify(error=str(exc)), 422
 

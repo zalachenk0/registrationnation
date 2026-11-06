@@ -13,8 +13,7 @@
 import { useState, useRef, useEffect } from "react";
 import logoUrl from "./imports/RN_Logo.png";
 import { fillBlank, requestScan, submitPrint, type ScanResult } from "./integration_BV";
-import { getPaymentConfig, PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG"; // [CG]
-import { CardPayment } from "./CardPayment_CG";
+import { PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG"; // [CG]
 import { TerminalPayment } from "./TerminalPayment_CG";
 import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
@@ -1001,21 +1000,8 @@ export default function App() {
   const cardEntry = useRef<CardEntry | null>(null);
   const [paymentReady, setPaymentReady] = useState(false);
 
-  // payment method: the S700 card reader is the primary option and the typed card is the backup.
-  // null = still asking the server which methods are set up
-  const [paymentMode, setPaymentMode] = useState<"terminal" | "card" | null>(null);
-  const [readerAvailable, setReaderAvailable] = useState(false);
-  const [readerProblem, setReaderProblem] = useState("");
-  useEffect(() => {
-    let active = true;
-    getPaymentConfig().then(config => {
-      if (!active) return;
-      setReaderAvailable(!!config.terminal?.enabled);
-      setReaderProblem(config.terminal?.problem || "");
-      setPaymentMode(current => current ?? (config.terminal?.enabled ? "terminal" : "card"));
-    }).catch(() => { if (active) setPaymentMode(current => current ?? "card"); });  // the card form shows the real error
-    return () => { active = false; };
-  }, []);
+  // [CG] payment method: the S700 card reader is the only one. The kiosk has no keyboard to type a card with, so there is
+  // no typed-card backup; a reader problem shows on the card reader step, with Retry connecting
 
   // monday.com crm record, shown on the success screen
   const [crmStatus, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
@@ -1309,7 +1295,7 @@ export default function App() {
               </div>
             )}
 
-            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setPaymentMode(readerAvailable ? "terminal" : "card"); setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />
+            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />
           </div>
         </div>
       </div>
@@ -1349,9 +1335,7 @@ export default function App() {
           {step === 2 && <Step2 data={license} onChange={setLicense} />}
           {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicleData={license} onVehicleChange={setLicense} />}
           {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
-          {step === 5 && paymentMode === null && <p role="status" className="text-sm">Checking payment options…</p>}
-        {step === 5 && paymentMode === "terminal" && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} onUseManual={() => { setPaymentStatus(""); setPaymentMode("card"); }} />}
-        {step === 5 && paymentMode === "card" && <CardPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} notice={readerProblem} onUseReader={readerAvailable ? () => { setPaymentStatus(""); setPaymentMode("terminal"); } : undefined} />}
+        {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} />}
         </div>
 
         <div className="flex items-center justify-between">

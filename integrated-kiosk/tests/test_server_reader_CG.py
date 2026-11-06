@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'home_test_CG'))
 import home_form_server_CG as home  # noqa: E402
 import payment_service_CG as payment  # noqa: E402
 import scanner_api_BV_CG as api  # noqa: E402
-from test_terminal_payments_CG import FORM, HEADERS, FakeStripe  # noqa: E402 same fake payments as the browser-reader tests
+from test_terminal_payments_CG import FORM, HEADERS, FakeStripe, old_typed_card_payment  # noqa: E402 same fake payments as the browser-reader tests
 
 LOCATION = 'tml_unit_fixture'
 
@@ -30,11 +30,12 @@ def stripe_error(code):
 
 
 class FakeReaders(FakeStripe):
-    """Adds Stripe's reader objects: retrieve, list, create, process_payment_intent, cancel_action and the test-mode tap."""
+    """Adds Stripe's reader objects: retrieve, list, create, process_payment_intent and cancel_action. [CG] Stripe's
+    test-mode helpers (making a pretend reader, a pretend tap) are recorded so the tests can prove the kiosk never uses them."""
 
     def __init__(self, monkeypatch):
         super().__init__(monkeypatch)
-        self.readers, self.sent, self.cleared, self.taps, self.made = {}, [], [], [], []
+        self.readers, self.sent, self.cleared, self.taps, self.made, self.helper_taps = {}, [], [], [], [], []
         Reader = stripe.terminal.Reader
         monkeypatch.setattr(Reader, 'retrieve', lambda rid, **kw: self._reader(rid))
         monkeypatch.setattr(Reader, 'list', lambda **kw: stripe.ListObject.construct_from(
@@ -42,7 +43,7 @@ class FakeReaders(FakeStripe):
         monkeypatch.setattr(Reader, 'create', self.create_reader)
         monkeypatch.setattr(Reader, 'process_payment_intent', self.process)
         monkeypatch.setattr(Reader, 'cancel_action', self.cancel_action)
-        monkeypatch.setattr(Reader.TestHelpers, 'present_payment_method', self.present)
+        monkeypatch.setattr(Reader.TestHelpers, 'present_payment_method', lambda *a, **kw: self.helper_taps.append((a, kw)))
 
     def add(self, rid, simulated=False, location=LOCATION, status='online'):
         self.readers[rid] = dict(id=rid, object='terminal.reader', location=location, status=status, action=None,
@@ -84,14 +85,14 @@ class FakeReaders(FakeStripe):
             action.update(status='failed', failure_code='card_declined', failure_message='Your card was declined.')
         return self._reader(rid)
 
-    def customer_taps(self, rid, approved=True):  # a real tap on a real reader, as far as the server can tell
+    def customer_taps(self, rid='tmr_kiosk', approved=True):  # a real tap on the real reader, as far as the server can tell
         self.present(rid, card_present=dict(number='4242424242424242' if approved else '4000000000000002'))
 
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_unit_fixture')
-    monkeypatch.setenv('STRIPE_PUBLISHABLE_KEY', 'pk_test_unit_fixture')
+    monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY', raising=False)
     monkeypatch.setenv('STRIPE_LOCATION_ID', LOCATION)
     monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
     monkeypatch.delenv('STRIPE_READER_ID', raising=False)
@@ -100,7 +101,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(api, 'payments', service)
     fake = FakeReaders(monkeypatch)
     fake.add('tmr_kiosk')
-    return service, fake
+    yield service, fake
+    assert fake.made == [] and fake.helper_taps == []  # [CG] every test: no pretend reader made, no pretend tap sent
 
 
 def only_intent(fake):
@@ -110,14 +112,14 @@ def only_intent(fake):
 
 # ---------- settings ----------
 
-def test_server_reader_needs_a_location_even_when_simulated(monkeypatch):
+def test_the_reader_needs_a_location_and_stripe_simulated_changes_nothing(monkeypatch):
     monkeypatch.setenv('STRIPE_SIMULATED', '1'); monkeypatch.delenv('STRIPE_LOCATION_ID', raising=False)
     monkeypatch.delenv('STRIPE_READER_ID', raising=False)
     settings = payment.server_reader_settings()
     assert settings['enabled'] is False and 'STRIPE_LOCATION_ID' in settings['problem']
-    assert payment.terminal_settings()['enabled'] is True  # the browser-direct simulator still works without one
+    assert payment.terminal_settings()['enabled'] is False  # [CG] the simulator no longer counts as a reader
     monkeypatch.setenv('STRIPE_LOCATION_ID', LOCATION)
-    assert payment.server_reader_settings() == dict(enabled=True, simulated=True, problem='')
+    assert payment.server_reader_settings() == dict(enabled=True, simulated=False, problem='')
 
 
 def test_a_mistyped_reader_id_turns_the_server_reader_off_with_a_reason(monkeypatch):
@@ -140,20 +142,22 @@ def test_the_one_real_reader_at_the_location_is_used(env):
     assert payment.find_reader() == 'tmr_kiosk'
 
 
-def test_simulated_mode_makes_stripes_pretend_s700_once_and_then_reuses_it(env, monkeypatch):
+def test_stripe_simulated_on_still_uses_the_physical_reader_and_makes_no_pretend_one(env, monkeypatch):
     service, fake = env
     monkeypatch.setenv('STRIPE_SIMULATED', '1')
-    first = payment.find_reader()
-    assert fake.made == [dict(registration_code='simulated-s700', location=LOCATION, label='Registration Nation simulated S700',
-                              idempotency_key='kiosk-simulated-reader-' + LOCATION)]
-    monkeypatch.setattr(payment, '_readers', {})  # even after a restart it finds the one it made instead of making another
-    assert payment.find_reader() == first and len(fake.made) == 1
+    assert payment.find_reader() == 'tmr_kiosk' and fake.made == []
+
+
+def test_a_leftover_simulated_reader_at_the_same_location_is_skipped(env):
+    service, fake = env
+    fake.add('tmr_pretend', simulated=True)  # still registered from earlier testing, and "online"
+    assert payment.find_reader() == 'tmr_kiosk'  # no STRIPE_READER_ID needed to tell them apart
 
 
 def test_real_mode_never_uses_a_simulated_reader(env, monkeypatch):
     service, fake = env
     del fake.readers['tmr_kiosk']; fake.add('tmr_pretend', simulated=True)
-    with pytest.raises(payment.PaymentError, match='No card reader is registered'):
+    with pytest.raises(payment.PaymentError, match='No physical card reader is registered'):
         payment.find_reader()
 
 
@@ -178,11 +182,14 @@ def test_a_reader_id_from_another_location_is_refused(env, monkeypatch):
         payment.find_reader()
 
 
-def test_a_reader_id_that_does_not_match_the_simulated_setting_is_refused(env, monkeypatch):
+@pytest.mark.parametrize('simulated_setting', [None, '1'])
+def test_a_reader_id_pointing_at_the_simulated_reader_is_refused(env, monkeypatch, simulated_setting):
     service, fake = env
     fake.add('tmr_pretend', simulated=True)
     monkeypatch.setenv('STRIPE_READER_ID', 'tmr_pretend')
-    with pytest.raises(payment.PaymentError, match='simulated'):
+    if simulated_setting:
+        monkeypatch.setenv('STRIPE_SIMULATED', simulated_setting)
+    with pytest.raises(payment.PaymentError, match="simulated reader. This kiosk only uses the physical S700"):
         payment.find_reader()
 
 
@@ -309,54 +316,29 @@ def test_cancel_after_approval_changes_nothing(env):
     assert fake.cleared == [] and fake.canceled == []
 
 
-# ---------- simulated tap ----------
+# ---------- [CG] no pretend taps and no typed card ----------
 
-def test_a_pretend_tap_is_refused_for_a_real_reader(env):
+def test_there_is_no_pretend_tap_any_more(env):
     service, fake = env
-    service.start_on_reader(FORM)
-    with pytest.raises(payment.PaymentError, match='simulated reader'):
-        service.simulate_tap(FORM, '4242424242424242')
-    assert fake.taps == []
+    assert not hasattr(service, 'simulate_tap')
+    reply = api.app.test_client().post('/api/payment/reader_simulate_tap', json=dict(FORM, test_card='4242424242424242'), headers=HEADERS)
+    assert reply.status_code in (404, 405) and fake.helper_taps == []
 
 
-def test_a_pretend_tap_only_takes_stripes_test_cards_and_only_after_pay(env, monkeypatch):
-    service, fake = env
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
-    service.create_payment_intent(FORM, mode='terminal')  # a payment exists, but nothing was sent to the reader yet
-    with pytest.raises(payment.PaymentError, match='Press Pay first'):
-        service.simulate_tap(FORM, '4242424242424242')
-    service.start_on_reader(FORM)
-    with pytest.raises(payment.PaymentError, match='test cards'):
-        service.simulate_tap(FORM, '5555555555554444')
-    assert fake.taps == []
-    assert service.simulate_tap(FORM, '4242 4242 4242 4242')['reader'] == 'approved'
-
-
-def test_simulated_decline_then_approval(env, monkeypatch):
-    service, fake = env
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
-    service.start_on_reader(FORM)
-    assert service.simulate_tap(FORM, '4000000000000002')['reader'] == 'failed'
-    service.start_on_reader(FORM)
-    assert service.simulate_tap(FORM, '4242424242424242')['reader'] == 'approved'
-    assert service.capture_payment_intent(FORM)['status'] == 'succeeded' and len(fake.intents) == 1
-
-
-# ---------- switching to the typed card ----------
-
-def test_an_unpaid_server_reader_payment_can_still_switch_to_the_typed_card(env):
+def test_a_reader_payment_can_never_switch_to_a_typed_card(env):
     service, fake = env
     service.start_on_reader(FORM)
     fake.readers['tmr_kiosk']['action'] = None  # customer canceled on the reader first
-    typed = service.create_payment_intent(FORM, mode='card')
-    assert typed['method'] == 'card' and len(fake.canceled) == 1
+    with pytest.raises(payment.PaymentError, match='turned off'):
+        service.create_payment_intent(FORM, mode='card')
+    assert fake.canceled == [] and len(fake.intents) == 1  # the reader payment is left as it was, ready for Pay again
 
 
 # ---------- kiosk routes ----------
 
 def test_reader_routes_need_the_kiosk_header(env):
     client = api.app.test_client()
-    for route in ('reader_start', 'reader_status', 'reader_cancel', 'reader_simulate_tap'):
+    for route in ('reader_start', 'reader_status', 'reader_cancel'):
         assert client.post('/api/payment/' + route, json=FORM).status_code == 403
 
 
@@ -374,11 +356,11 @@ def test_reader_start_route_does_the_same_kiosk_side_steps_as_create_intent(env,
 
 def test_reader_routes_walk_a_whole_payment(env, monkeypatch):
     service, fake = env
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
     client = api.app.test_client()
     post = lambda route, body=FORM: client.post('/api/payment/' + route, json=body, headers=HEADERS)
     assert post('reader_start').get_json()['reader'] == 'waiting'
-    assert post('reader_simulate_tap', dict(FORM, test_card='4242424242424242')).get_json()['reader'] == 'approved'
+    assert post('reader_status').get_json()['reader'] == 'waiting'
+    fake.customer_taps()
     assert post('reader_status').get_json()['reader'] == 'approved'
     assert post('capture_intent').get_json()['status'] == 'succeeded'
 
@@ -394,15 +376,118 @@ def test_reader_route_errors_come_back_as_messages_not_crashes(env):
 
 def test_home_form_runs_the_server_driven_reader_too(env, tmp_path, monkeypatch):
     service, fake = env
-    monkeypatch.setenv('STRIPE_SIMULATED', '1')
     app = home.create_app(tmp_path / 'home')
     client = app.test_client()
     post = lambda route, body=FORM: client.post('/api/payment/' + route, json=body, headers=HEADERS)
     settings = client.get('/api/home/settings').get_json()
     assert settings['serverReader'] is True and settings['serverReaderProblem'] == ''
     assert post('reader_start').get_json()['reader'] == 'waiting'
-    assert post('reader_simulate_tap', dict(FORM, test_card='4000000000000002')).get_json()['reader'] == 'failed'
+    fake.customer_taps(approved=False)
+    assert post('reader_status').get_json()['reader'] == 'failed'
     assert post('reader_start').get_json()['reader'] == 'waiting'
-    assert post('reader_simulate_tap', dict(FORM, test_card='4242424242424242')).get_json()['reader'] == 'approved'
+    fake.customer_taps()
+    assert post('reader_status').get_json()['reader'] == 'approved'
     assert post('capture_intent').get_json()['status'] == 'succeeded'
     assert len(fake.intents) == 1
+    assert client.post('/api/payment/reader_simulate_tap', json=FORM, headers=HEADERS).status_code in (404, 405)
+    refused = client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='card'), headers=HEADERS)
+    assert refused.status_code == 409 and 'turned off' in refused.get_json()['error']
+
+
+# ---------- asked by payment id (today's built screen, through dist/stripe-terminal-server_CG.js) ----------
+
+def by_id(service, **extra):
+    """What the built screen does: create_intent with the form, then hands only the payment's id to the reader steps."""
+    intent = service.create_payment_intent(FORM, mode='terminal')
+    return dict(payment_intent=intent['id'], **extra)
+
+
+def test_by_id_the_screens_own_payment_goes_to_the_reader_once(env):
+    service, fake = env
+    ask = by_id(service)
+    assert service.start_on_reader(ask)['reader'] == 'waiting'
+    assert service.start_on_reader(ask)['reader'] == 'waiting'  # pressing on again while it waits
+    assert fake.sent == [('tmr_kiosk', ask['payment_intent'])] and len(fake.intents) == 1
+
+
+def test_by_id_a_whole_payment_with_a_decline_first(env, monkeypatch):
+    service, fake = env
+    ask = by_id(service)
+    service.start_on_reader(ask)
+    fake.customer_taps(approved=False)
+    assert service.reader_status(ask)['reader'] == 'failed'
+    service.start_on_reader(ask)
+    fake.customer_taps()
+    assert service.reader_status(ask)['reader'] == 'approved'
+    assert service.capture_payment_intent(FORM)['status'] == 'succeeded' and len(fake.intents) == 1
+
+
+def test_by_id_only_payments_from_this_kiosks_ledger_are_accepted(env):
+    service, fake = env
+    by_id(service)
+    for bad in ('pi_not_in_this_ledger', 'pi_../../x', '', 42, None, 'cus_123'):
+        with pytest.raises(payment.PaymentError, match='not a payment this kiosk started'):
+            service.start_on_reader({'payment_intent': bad})
+    assert fake.sent == []
+
+
+def test_by_id_an_old_typed_card_payment_is_never_sent_to_the_reader(env):
+    service, fake = env
+    old = old_typed_card_payment(service, fake)  # left in the ledger from before the reader became the only way to pay
+    with pytest.raises(payment.PaymentError, match='not started for the card reader'):
+        service.start_on_reader({'payment_intent': old.id})
+    assert fake.sent == []
+
+
+def test_any_other_key_means_the_full_form_is_required(env):
+    service, fake = env
+    ask = by_id(service)
+    with pytest.raises(ValueError, match='Complete these fields'):  # the normal form check refuses it (routes answer 422)
+        service.start_on_reader(dict(ask, vin='1HGCM82633A004352'))  # half a form is not a form
+    assert payment.intent_only(ask) and not payment.intent_only(dict(ask, test_card='4242')) and not payment.intent_only(FORM)
+
+
+def test_by_id_cancel_and_status(env):
+    service, fake = env
+    ask = by_id(service)
+    service.start_on_reader(ask)
+    assert service.cancel_on_reader(ask)['reader'] == 'idle' and fake.cleared == ['tmr_kiosk'] and fake.canceled == []
+
+
+def test_by_id_route_does_not_repeat_the_payment_started_steps(env, monkeypatch):
+    service, fake = env
+    steps = []
+    monkeypatch.setattr(api.delivery, 'enqueue_capture', lambda *a: steps.append('security photo'))
+    monkeypatch.setattr(api.photos, 'bind', lambda ref: steps.append('photos'))
+    client = api.app.test_client()
+    intent = client.post('/api/payment/create_intent', json=dict(FORM, payment_mode='terminal'), headers=HEADERS).get_json()
+    assert steps == ['security photo', 'photos']  # create_intent did them once
+    reply = client.post('/api/payment/reader_start', json={'payment_intent': intent['id']}, headers=HEADERS)
+    assert reply.status_code == 200 and reply.get_json()['reader'] == 'waiting'
+    assert steps == ['security photo', 'photos']  # and the by-id start did not do them again
+
+
+# ---------- a payment the reader is in the middle of is never thrown away ----------
+
+def test_create_intent_never_cancels_a_payment_the_reader_is_working_on(env):
+    service, fake = env
+    service.start_on_reader(FORM)
+    intent = only_intent(fake)
+    intent.status = 'requires_confirmation'  # the reader has the card and is mid-approval
+    again = service.create_payment_intent(FORM, mode='terminal')  # e.g. the screen's Pay pressed again right then
+    assert again['id'] == intent.id and fake.canceled == []
+
+
+def test_a_stalled_payment_the_reader_is_not_working_on_is_still_replaced(env):
+    service, fake = env
+    service.start_on_reader(FORM)
+    intent = only_intent(fake)
+    intent.status = 'requires_confirmation'
+    fake.readers['tmr_kiosk']['action'] = None  # the reader let go of it
+    assert service.create_payment_intent(FORM, mode='terminal')['id'] != intent.id and fake.canceled == [intent.id]
+
+
+def test_the_reader_check_never_raises(env, monkeypatch):
+    service, fake = env
+    monkeypatch.setattr(stripe.terminal.Reader, 'retrieve', lambda *a, **k: (_ for _ in ()).throw(stripe_error('api_error')))
+    assert payment.reader_working_on('pi_anything') is False

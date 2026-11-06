@@ -177,7 +177,7 @@ class PhotoDesk:
             return
         with self._db() as db:
             if db.execute("SELECT 1 FROM crm_photos WHERE reference = ? LIMIT 1", (reference,)).fetchone():
-                return  # the same payment again (a retry or a switch to the typed card): the first link stands, and nothing is cleared
+                return  # the same payment again (a retry, or an old unpaid payment replaced): the first link stands, and nothing is cleared
         with self.lock:
             photos, self.current = self.current, {}
             self.license_print = None
