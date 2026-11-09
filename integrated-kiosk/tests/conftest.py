@@ -13,6 +13,7 @@
 - The kiosk now needs a signed-in session and a kiosk header on every /api/ call (kiosk_auth_BV.py), so the tests
   act as a signed-in operator. Without this every route test fails with 403.
 - The office problem log goes to a throwaway file, never to the kiosk's real runtime/kiosk-problems.log.
+- Back-of-license photos from scans in any test go to a throwaway folder, never to the kiosk's real runtime/license_back.
 - Folders the app creates under runtime/ while the tests run are removed at the end, but only if runtime/
   did not exist before, so a real kiosk's data is never touched.
 """
@@ -34,6 +35,7 @@ def pytest_sessionfinish(session, exitstatus):
 def problem_log(tmp_path, monkeypatch):
     path = tmp_path / 'kiosk-problems.log'
     monkeypatch.setenv('KIOSK_PROBLEM_LOG', str(path))
+    monkeypatch.setenv('KIOSK_LICENSE_BACK_PHOTO_DIR', str(tmp_path / 'license_back'))  # a successful license scan now keeps its picture
     return path
 
 

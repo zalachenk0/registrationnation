@@ -55,9 +55,10 @@ def monday_who(payload, fields):  # same wording as monday_who() in scanner_api_
 def create_app(scratch=None):
     scratch = Path(scratch) if scratch else ROOT / 'runtime' / 'home_test'
     scratch.mkdir(parents=True, exist_ok=True)
-    # these three settings send every file this test writes to its own folder, so a home test never touches the real kiosk's photos or problem log
+    # these settings send every file this test writes to its own folder, so a home test never touches the real kiosk's photos or problem log
     os.environ['KIOSK_PROBLEM_LOG'] = str(scratch / 'kiosk-problems.log')
     os.environ['KIOSK_LICENSE_PHOTO_DIR'] = str(scratch / 'license_front')
+    os.environ['KIOSK_LICENSE_BACK_PHOTO_DIR'] = str(scratch / 'license_back')
     os.environ['KIOSK_INSURANCE_PHOTO_DIR'] = str(scratch / 'insurance_front')
     payments = PaymentService(scratch / 'payments.sqlite3')  # its own ledger, separate from the kiosk's
     photos = PhotoDesk(scratch, database=scratch / 'photos.sqlite3')
@@ -101,7 +102,8 @@ def create_app(scratch=None):
             reader='real' if reader['enabled'] else 'none', readerProblem=reader['problem'],
             serverReader=server['enabled'], serverReaderProblem=server['problem'],
             monday=has('MONDAY_API_TOKEN') and has('MONDAY_BOARD_ID'),
-            licenseColumn=has('MONDAY_LICENSE_PHOTO_COLUMN'), insuranceColumn=has('MONDAY_INSURANCE_PHOTO_COLUMN'),
+            licenseColumn=has('MONDAY_LICENSE_PHOTO_COLUMN'), licenseBackColumn=has('MONDAY_LICENSE_BACK_PHOTO_COLUMN'),
+            insuranceColumn=has('MONDAY_INSURANCE_PHOTO_COLUMN'),
             keepLocal=os.getenv(KEEP_SETTING, '').strip().lower() in {'1', 'true', 'yes', 'on'})
 
     # ---- payment: the same calls, in the same order, as the kiosk's scanner_api_BV_CG.py ----
@@ -196,10 +198,10 @@ def create_app(scratch=None):
     @app.post('/api/home/photos')
     def add_photos():
         try:
-            front, insurance = read_picture('license_front'), read_picture('insurance')
+            front, back, insurance = read_picture('license_front'), read_picture('license_back'), read_picture('insurance')
         except ValueError as exc:
             return jsonify(error=str(exc)), 422
-        if front is None and insurance is None:
+        if front is None and back is None and insurance is None:
             return jsonify(error='Pick at least one picture.'), 422
         saved = []
         if front is not None:  # saved and remembered exactly like the kiosk's front-of-license photo
@@ -214,6 +216,9 @@ def create_app(scratch=None):
                 stream.write(encoded.tobytes())
             photos.license_taken(target)
             saved.append('license')
+        if back is not None:  # after the front, like at the kiosk (a new front photo drops any older back photo)
+            photos.save_license_back(back)
+            saved.append('license_back')
         if insurance is not None:
             photos.save_insurance(insurance)
             saved.append('insurance')

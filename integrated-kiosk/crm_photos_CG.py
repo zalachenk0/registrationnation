@@ -1,18 +1,18 @@
 # ============================================================================
 # File:         crm_photos_CG.py
 # Written by:   CG (Cristian Gonzalez)
-# What it does: Links each customer's license and insurance photos to their
-#               payment, uploads them to the Monday.com record and deletes the
-#               kiosk copy once Monday has it.
+# What it does: Links each customer's license (front and back) and insurance
+#               photos to their payment, uploads them to the Monday.com record
+#               and deletes the kiosk copy once Monday has it.
 # Team-written: All logic written by CG (Cristian Gonzalez), except the lines
 #               tagged [3RD PARTY].
 # Third-party:  OpenCV; Monday.com file upload (through monday_service_CG.py);
 #               SQLite (Python standard library).
 # ============================================================================
-"""Photos for the Monday.com record: the front of the driver's license and the insurance card.
+"""Photos for the Monday.com record: the front and back of the driver's license and the insurance card.
 
 How a photo finds its record, without the browser having to carry anything:
-  1. The kiosk saves a photo as the customer scans (license front, insurance card). Each is remembered as
+  1. The kiosk saves a photo as the customer scans (license front, license back, insurance card). Each is remembered as
      "the photos for the customer at the kiosk right now".
   2. When that customer starts to pay, the photos are linked to the payment reference and the memory is cleared,
      so the next customer starts with nothing.
@@ -28,11 +28,16 @@ Keeping one customer's photos off the next customer's record:
   - a license photo taken more than SAME_CUSTOMER_MINUTES after the last one starts a new customer
   - scanning a different license barcode than before also means a new customer, and drops the old insurance photo
   - photos older than MAX_AGE_MINUTES are never attached
+  - a new front photo drops the back photo: at the kiosk the back is always scanned after the front, so a back photo
+    still waiting when a front photo is taken can belong to someone who walked away
   - once a payment has taken the photos, they are gone from memory
 
 Settings in .env (a photo is only uploaded if its column is set; run  py monday_service_CG.py columns  to find the ids):
-  MONDAY_LICENSE_PHOTO_COLUMN     id of a Files column for the front of the driver's license
-  MONDAY_INSURANCE_PHOTO_COLUMN   id of a Files column for the insurance card
+  MONDAY_LICENSE_PHOTO_COLUMN       id of a Files column for the front of the driver's license
+  MONDAY_LICENSE_BACK_PHOTO_COLUMN  id of a Files column for the back of the driver's license (the barcode side)
+  MONDAY_INSURANCE_PHOTO_COLUMN     id of a Files column for the insurance card
+
+The back-of-license photo is the same camera picture the barcode scan reads, kept only when the barcode was read.
 """
 from __future__ import annotations
 
@@ -52,9 +57,11 @@ import cv2
 
 import monday_service_CG as monday_service
 
-KINDS = ("license", "insurance")
-SETTINGS = {"license": "MONDAY_LICENSE_PHOTO_COLUMN", "insurance": "MONDAY_INSURANCE_PHOTO_COLUMN"}
-NAMES = {"license": "license-front", "insurance": "insurance-card"}
+KINDS = ("license", "license_back", "insurance")
+SETTINGS = {"license": "MONDAY_LICENSE_PHOTO_COLUMN", "license_back": "MONDAY_LICENSE_BACK_PHOTO_COLUMN", "insurance": "MONDAY_INSURANCE_PHOTO_COLUMN"}
+NAMES = {"license": "license-front", "license_back": "license-back", "insurance": "insurance-card"}
+# where this file saves the photos it takes itself: kind -> (setting that can move the folder, folder under runtime/)
+SAVED_HERE = {"license_back": ("KIOSK_LICENSE_BACK_PHOTO_DIR", "license_back"), "insurance": ("KIOSK_INSURANCE_PHOTO_DIR", "insurance_front")}
 SAME_CUSTOMER_MINUTES = 10  # a license photo this soon after the last one is the same person retaking it
 MAX_AGE_MINUTES = 45  # photos older than this are never attached to a payment
 KEEP_SETTING = "KIOSK_KEEP_LOCAL_PHOTOS"  # set to 1 to keep photos on the kiosk after they reach Monday
@@ -139,6 +146,7 @@ class PhotoDesk:
                 self.current = {}  # nobody has been at the kiosk for a while: this is a new customer
                 self.license_print = None
             self.current["license"] = (str(path), time.time())  # a retake by the same person just replaces it
+            self.current.pop("license_back", None)  # the back always comes after the front, so an older back photo may be someone else's
 
     def license_scanned(self, decoded) -> None:
         """The back of the license was scanned. A different card than before means a different customer."""
@@ -146,16 +154,29 @@ class PhotoDesk:
         with self.lock:
             if self.license_print not in (None, fingerprint):
                 self.current.pop("insurance", None)  # that insurance photo belonged to the previous customer
+                self.current.pop("license_back", None)  # and so did that back photo
             self.license_print = fingerprint
 
     def save_insurance(self, image) -> Path:
         """Saves the photo that was just read as the insurance card, as a jpeg (the OCR debug images may be switched off)."""
-        directory = Path(os.getenv("KIOSK_INSURANCE_PHOTO_DIR") or self.root / "runtime" / "insurance_front")
+        return self._save("insurance", image)
+
+    def save_license_back(self, image) -> Path:
+        """Saves the photo the license barcode was just read from: that's the back of the license."""
+        return self._save("license_back", image)
+
+    def _folder(self, kind) -> Path:
+        setting, folder = SAVED_HERE[kind]
+        return Path(os.getenv(setting) or self.root / "runtime" / folder)
+
+    # saves a scan picture as a jpeg in that kind's folder and remembers it for the customer at the kiosk
+    def _save(self, kind, image) -> Path:
+        directory = self._folder(kind)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ") + "-" + uuid.uuid4().hex + ".jpg"
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
-            raise OSError("could not encode the insurance photo")
+            raise OSError(f"could not encode the {NAMES[kind]} photo")
         target = directory / name
         try:
             with target.open("xb") as photo:
@@ -165,7 +186,7 @@ class PhotoDesk:
             target.unlink(missing_ok=True)
             raise
         with self.lock:
-            self.current["insurance"] = (str(target), time.time())
+            self.current[kind] = (str(target), time.time())
         return target
 
     # ---- when the customer pays, and when the monday record exists ----
@@ -239,10 +260,9 @@ class PhotoDesk:
         self._finish(row, "uploaded", "")
         self._delete_local_copy(row)  # monday has it now, so the kiosk does not need to keep it
 
-    # the only folders a photo may be deleted from: the two this kiosk saves customer photos in
+    # the only folders a photo may be deleted from: the ones this kiosk saves customer photos in
     def _photo_folders(self) -> list[Path]:
-        return [Path(os.getenv("KIOSK_LICENSE_PHOTO_DIR") or self.root / "runtime" / "license_front"),
-                Path(os.getenv("KIOSK_INSURANCE_PHOTO_DIR") or self.root / "runtime" / "insurance_front")]
+        return [Path(os.getenv("KIOSK_LICENSE_PHOTO_DIR") or self.root / "runtime" / "license_front")] + [self._folder(kind) for kind in SAVED_HERE]
 
     # called only after monday has confirmed the photo. A delete that goes wrong never undoes the upload
     def _delete_local_copy(self, row) -> None:

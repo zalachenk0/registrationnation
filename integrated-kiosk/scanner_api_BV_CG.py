@@ -187,6 +187,7 @@ def scan(kind):
             if result.get('success') and kind in {'license', 'insurance'}:  # a scan that read nothing must not replace a good photo
                 if kind == 'license':
                     photos.license_scanned(result.get('fields'))  # [CG] a different card than before means a different customer
+                    photos.save_license_back(image)  # [CG] the barcode was read from this picture, so it's the back of the license: kept for the Monday record
                 else:
                     photos.save_insurance(image)  # [CG] kept as a jpeg for the Monday record, even when the OCR debug images are off
         except Exception:

@@ -61,6 +61,7 @@ Third-party:  The Stripe Terminal JS SDK (js.stripe.com/terminal/v1), loaded
     <h2>2. Photos <small>(stand-ins for the camera photos; any pictures work)</small></h2>
     <div class="grid">
       <label>Front of the license<input type="file" id="licenseFile" accept="image/*"><img id="licensePreview" class="preview" alt="" hidden></label>
+      <label>Back of the license<input type="file" id="licenseBackFile" accept="image/*"><img id="licenseBackPreview" class="preview" alt="" hidden></label>
       <label>Insurance card<input type="file" id="insuranceFile" accept="image/*"><img id="insurancePreview" class="preview" alt="" hidden></label>
     </div>
     <div class="row"><button id="photoButton" type="button">Save photos</button><small>Do this before paying, like at the kiosk.</small></div>
@@ -154,13 +155,15 @@ Third-party:  The Stripe Terminal JS SDK (js.stripe.com/terminal/v1), loaded
       else add('bad', 'Card reader not set up' + (s.readerProblem ? ': ' + s.readerProblem : '') + '. Payments need the physical S700.');
       add(s.monday ? 'ok' : 'bad', s.monday ? 'Monday token and board found' : 'Monday token or board missing (MONDAY_API_TOKEN / MONDAY_BOARD_ID in .env)');
       add(s.licenseColumn ? 'ok' : 'warn', s.licenseColumn ? 'License photo column set' : 'License photo column not set (MONDAY_LICENSE_PHOTO_COLUMN). That photo will be skipped.');
+      add(s.licenseBackColumn ? 'ok' : 'warn', s.licenseBackColumn ? 'License back photo column set' : 'License back photo column not set (MONDAY_LICENSE_BACK_PHOTO_COLUMN). That photo will be skipped.');
       add(s.insuranceColumn ? 'ok' : 'warn', s.insuranceColumn ? 'Insurance photo column set' : 'Insurance photo column not set (MONDAY_INSURANCE_PHOTO_COLUMN). That photo will be skipped.');
       add(s.keepLocal ? 'warn' : 'ok', s.keepLocal ? 'KIOSK_KEEP_LOCAL_PHOTOS is on: photos will NOT be deleted after upload' : 'Photos are deleted from this computer once Monday has them');
     } catch (error) { add('bad', 'Could not reach the test server: ' + error.message); }
   }
 
   // ---------- photos ----------
-  for (const [input, preview] of [['licenseFile', 'licensePreview'], ['insuranceFile', 'insurancePreview']]) {
+  const PHOTO_NAMES = { license: 'Front of license', license_back: 'Back of license', insurance: 'Insurance card' };
+  for (const [input, preview] of [['licenseFile', 'licensePreview'], ['licenseBackFile', 'licenseBackPreview'], ['insuranceFile', 'insurancePreview']]) {
     $(input).addEventListener('change', () => { const f = $(input).files[0]; $(preview).hidden = !f; if (f) $(preview).src = URL.createObjectURL(f); });
   }
   $('photoButton').addEventListener('click', async () => {
@@ -168,12 +171,13 @@ Third-party:  The Stripe Terminal JS SDK (js.stripe.com/terminal/v1), loaded
     if (state.started) { message.className = 'warn'; message.textContent = 'Payment already started, so these photos would not join it. Press "Start over" first.'; return; }
     const form = new FormData();
     if ($('licenseFile').files[0]) form.append('license_front', $('licenseFile').files[0]);
+    if ($('licenseBackFile').files[0]) form.append('license_back', $('licenseBackFile').files[0]);
     if ($('insuranceFile').files[0]) form.append('insurance', $('insuranceFile').files[0]);
     try {
       const response = await fetch('/api/home/photos', { method: 'POST', body: form, headers: { 'X-Kiosk-Payment': '1' } });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The photos could not be saved.');
-      message.className = 'ok'; message.textContent = 'Saved: ' + result.saved.join(' and ') + '. They will go to Monday after the record is saved.';
+      message.className = 'ok'; message.textContent = 'Saved: ' + result.saved.map(k => PHOTO_NAMES[k] || k).join(', ') + '. They will go to Monday after the record is saved.';
     } catch (error) { message.className = 'bad'; message.textContent = error.message; }
   });
 
@@ -324,7 +328,7 @@ Third-party:  The Stripe Terminal JS SDK (js.stripe.com/terminal/v1), loaded
         for (const p of result.photos || []) {
           const tr = document.createElement('tr');
           const copy = p.state === 'uploaded' ? (p.onKiosk ? 'still here (not deleted)' : 'deleted ✓') : (p.onKiosk ? 'kept here' : 'gone');
-          for (const text of [p.kind === 'license' ? 'Front of license' : 'Insurance card', (WORDS[p.state] || p.state) + nextTry(p), String(p.attempts), copy, p.note || '']) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
+          for (const text of [PHOTO_NAMES[p.kind] || p.kind, (WORDS[p.state] || p.state) + nextTry(p), String(p.attempts), copy, p.note || '']) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); }
           body.appendChild(tr);
         }
         const rows = result.photos || [];

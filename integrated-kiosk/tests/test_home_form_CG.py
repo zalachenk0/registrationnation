@@ -62,14 +62,15 @@ class FakeStripe:  # the same idea as the kiosk's other payment tests: Stripe's 
 
 @pytest.fixture
 def home_test(tmp_path, monkeypatch):
-    for name in ('KIOSK_PROBLEM_LOG', 'KIOSK_LICENSE_PHOTO_DIR', 'KIOSK_INSURANCE_PHOTO_DIR'):
-        monkeypatch.setenv(name, 'restored-after-the-test')          # create_app changes these three, so the test puts them back afterwards
+    for name in ('KIOSK_PROBLEM_LOG', 'KIOSK_LICENSE_PHOTO_DIR', 'KIOSK_LICENSE_BACK_PHOTO_DIR', 'KIOSK_INSURANCE_PHOTO_DIR'):
+        monkeypatch.setenv(name, 'restored-after-the-test')          # create_app changes these, so the test puts them back afterwards
     monkeypatch.setenv('STRIPE_SECRET_KEY', 'sk_test_unit_fixture')
     monkeypatch.delenv('STRIPE_PUBLISHABLE_KEY', raising=False)
     monkeypatch.setenv('STRIPE_LOCATION_ID', 'tml_unit_fixture')  # [CG] the physical reader is the only way to pay
     monkeypatch.delenv('STRIPE_SIMULATED', raising=False)
     monkeypatch.setenv('MONDAY_LICENSE_PHOTO_COLUMN', 'files_license')
     monkeypatch.setenv('MONDAY_INSURANCE_PHOTO_COLUMN', 'files_insurance')
+    monkeypatch.delenv('MONDAY_LICENSE_BACK_PHOTO_COLUMN', raising=False)
     monkeypatch.delenv('KIOSK_KEEP_LOCAL_PHOTOS', raising=False)
     fake = FakeStripe(monkeypatch)
     uploads, records = [], []
@@ -198,7 +199,7 @@ def test_everything_the_test_form_writes_stays_in_its_own_folder(home_test):
     for name in ('payments.sqlite3', 'photos.sqlite3'):
         assert (home_test.scratch / name).exists()
     import os
-    for name in ('KIOSK_PROBLEM_LOG', 'KIOSK_LICENSE_PHOTO_DIR', 'KIOSK_INSURANCE_PHOTO_DIR'):
+    for name in ('KIOSK_PROBLEM_LOG', 'KIOSK_LICENSE_PHOTO_DIR', 'KIOSK_LICENSE_BACK_PHOTO_DIR', 'KIOSK_INSURANCE_PHOTO_DIR'):
         assert Path(os.environ[name]).resolve().is_relative_to(home_test.scratch.resolve())
 
 
@@ -253,3 +254,26 @@ def test_the_page_keeps_watching_long_enough_to_see_a_photo_give_up():
     minutes = re.search(r'const WATCH_FOR_MS = (\d+) \* 60 \* 1000;', page)
     assert minutes and int(minutes.group(1)) >= 16                                    # 1 + 2 + 4 + 8 minutes of waits, plus the worker's 15 s naps
     assert 'WATCH_FOR_MS) clearInterval' in page and '<th>Why</th>' in page and 'p.note' in page and 'textContent = text' in page
+
+
+# ---------- [CG] the back of the license ----------
+
+def test_a_back_of_license_picture_reaches_its_own_column(home_test, monkeypatch):
+    monkeypatch.setenv('MONDAY_LICENSE_BACK_PHOTO_COLUMN', 'files_license_back')
+    assert home_test.client.get('/api/home/settings').get_json()['licenseBackColumn'] is True
+    r = home_test.client.post('/api/home/photos', data={'license_front': (io.BytesIO(picture()), 'front.jpg'), 'license_back': (io.BytesIO(picture(color=(30, 200, 30))), 'back.jpg'),
+                                                       'insurance': (io.BytesIO(picture(color=(30, 30, 200))), 'card.jpg')}, headers=HEADERS)
+    assert r.status_code == 200 and r.get_json()['saved'] == ['license', 'license_back', 'insurance']
+    assert len(list((home_test.scratch / 'license_back').glob('*.jpg'))) == 1      # saved in the test's own folder
+    intent = visit(home_test, with_photos=False)
+    save_record(home_test, intent)
+    home_test.desk.process_once()
+    assert sorted(u[1] for u in home_test.uploads) == ['files_insurance', 'files_license', 'files_license_back']
+    status = {p['kind']: p for p in home_test.client.get('/api/home/photo_status/' + REF).get_json()['photos']}
+    assert status['license_back']['state'] == 'uploaded' and status['license_back']['onKiosk'] is False
+    page = home_test.client.get('/').get_data(as_text=True)
+    assert 'licenseBackFile' in page and "form.append('license_back'" in page and 'MONDAY_LICENSE_BACK_PHOTO_COLUMN' in page
+
+
+def test_the_setup_check_says_when_the_back_column_is_missing(home_test):
+    assert home_test.client.get('/api/home/settings').get_json()['licenseBackColumn'] is False
