@@ -296,6 +296,15 @@ def test_with_no_columns_set_nothing_is_asked_of_the_security_pi(kit, monkeypatc
     assert kit.pi.requests == [] and kit.uploads == [] and {r['state'] for r in rows(kit)} == {'skipped'}
 
 
+def test_the_env_template_lists_every_monday_photo_column_the_code_reads():
+    """Every photo column setting the kiosk reads must be in .env.example, or whoever sets up a Pi won't know it exists."""
+    import crm_photos_CG as crm_photos
+    template = (sp.Path(sp.__file__).parent / '.env.example').read_text()
+    settings = set(crm_photos.SETTINGS.values()) | {setting for setting, _, _ in sp.EVENTS.values()}
+    missing = sorted(name for name in settings if f'\n{name}=' not in template)
+    assert missing == [], 'add these to .env.example: ' + ', '.join(missing)
+
+
 def test_with_only_the_pay_column_set_only_that_photo_goes(kit, monkeypatch):
     monkeypatch.delenv('MONDAY_SECURITY_LICENSE_COLUMN')
     monkeypatch.delenv('MONDAY_SECURITY_PRINT_COLUMN')
