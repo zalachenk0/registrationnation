@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from kiosk_auth_BV import install_auth
 from delivery_service_BV import DeliveryService
 from crm_photos_CG import PhotoDesk, clean_reference, log_problem  # [CG] log_problem writes the office's runtime/kiosk-problems.log
+from security_photos_CG import SecurityPhotos  # [CG] the security Pi's photos on the Monday record
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env')
@@ -54,6 +55,9 @@ atexit.register(delivery.stop.set)
 photos = PhotoDesk(ROOT)  # [CG] remembers each customer's license and insurance photos and attaches them to their Monday record
 photos.start()  # [CG]
 atexit.register(photos.stop.set)  # [CG]
+security_photos = SecurityPhotos(ROOT)  # [CG] license-scanner, Pay and print-finished photos from the security Pi go on the Monday record
+security_photos.start()  # [CG]
+atexit.register(security_photos.stop.set)  # [CG]
 scan_lock = threading.Lock()
 atexit.register(camera.close)
 
@@ -254,6 +258,10 @@ def payment_started(payload):
         photos.bind(payload.get('confirmation_number'))  # [CG] this customer's photos now belong to this payment
     except Exception:
         app.logger.warning('The photos could not be linked to this payment; the Monday record will go without them.')
+    try:
+        security_photos.bind(payload.get('confirmation_number'))  # [CG] after the Pay photo was queued above, so it is found
+    except Exception:
+        app.logger.warning('The security photos could not be linked to this payment.')
 
 
 @app.post('/api/payment/create_intent')
@@ -341,6 +349,10 @@ def monday_create_record():
         photos.attach(fields.get('confirmationNumber'), result.get('itemId'))  # [CG] the photos upload in the background, after this answer
     except Exception:
         app.logger.warning('The photos could not be queued for the Monday record.')
+    try:
+        security_photos.attach(fields.get('confirmationNumber'), result.get('itemId'))  # [CG] security photos follow in the background too
+    except Exception:
+        app.logger.warning('The security photos could not be queued for the Monday record.')
     return jsonify(success=True, **result)
 
 

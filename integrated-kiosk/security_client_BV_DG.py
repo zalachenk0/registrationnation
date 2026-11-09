@@ -11,9 +11,15 @@
 """Server-to-server camera request; credentials never enter the browser."""
 import json
 import os
+import threading
 import time
 import uuid
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+
+
+# [CG] only one thing may use the serial wire at a time. security_photos_CG.py downloads photos over the same
+# wire, so a new capture waits a moment for it here instead of failing with "port busy".
+SERIAL_LOCK = threading.Lock()
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -53,7 +59,7 @@ def capture_serial(event='license_scan', request_id=None):
     if len(token) < 32:
         raise ValueError('Configure the same token of at least 32 characters on both Pis.')
     request_id = request_id or uuid.uuid4().hex
-    with serial.Serial(os.getenv('SECURITY_SERIAL_PORT', '/dev/serial0'),
+    with SERIAL_LOCK, serial.Serial(os.getenv('SECURITY_SERIAL_PORT', '/dev/serial0'),  # [CG] SERIAL_LOCK
                        baudrate=115200, timeout=0.2, write_timeout=2, exclusive=True) as port:
         port.reset_input_buffer()
         port.write(encode({'id': request_id, 'action': 'capture_front', 'event': event}, token))
