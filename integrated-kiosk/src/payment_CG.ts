@@ -1,3 +1,4 @@
+import { kioskFetch } from "./integration_BV";
 // ============================================================================
 // File:         payment_CG.ts
 // Written by:   CG (Cristian Gonzalez)
@@ -22,7 +23,7 @@ export async function api(path: string, payload?: Record<string, string>): Promi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
   try {
-    const response = await fetch(`/api/payment/${path}`, {
+    const response = await kioskFetch(`/api/payment/${path}`, {
       method: path === "config" ? "GET" : "POST",
       headers: { "Content-Type": "application/json", "X-Kiosk-Payment": "1" },
       body: payload ? JSON.stringify(payload) : undefined, signal: controller.signal,

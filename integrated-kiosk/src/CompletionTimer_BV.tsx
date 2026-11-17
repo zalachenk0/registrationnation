@@ -38,6 +38,7 @@ export function CompletionTimer({ onReset }: { onReset: () => void }) {
       }} className="px-8 py-3 rounded-lg text-sm font-semibold" style={{ backgroundColor: "var(--primary)", color: "#fff" }}>
         {paused ? "Resume 20-second countdown" : "Wait, I’m still here"}
       </button>
+      <button type="button" onClick={onReset} className="px-8 py-3 rounded-lg text-sm font-semibold" style={{ backgroundColor: "var(--accent)", color: "#fff" }}>Done</button>
     </div>
   );
 }

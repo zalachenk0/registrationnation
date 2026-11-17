@@ -1,3 +1,4 @@
+import { kioskFetch } from "./integration_BV";
 // ============================================================================
 // File:         monday_CG.ts
 // Written by:   CG (Cristian Gonzalez)
@@ -25,7 +26,7 @@ export async function createMondayRecord(
   fields: Record<string, string | number>
 ): Promise<MondayResult> {
   try {
-    const response = await fetch("/api/monday/create_record", {   // our route, not monday's
+    const response = await kioskFetch("/api/monday/create_record", {   // our route, not monday's
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ itemName, fields }),

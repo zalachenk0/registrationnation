@@ -40,9 +40,8 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy }: 
   const connected = !loading && !error;
   return <div className="flex flex-col gap-6">
     <div className="rounded-lg p-4" style={{ backgroundColor: "#fffbea", border: "1px solid #f5d76e" }}>
-      <p className="text-sm font-semibold" style={{ color: "#b45309" }}>Stripe Terminal — Test Mode</p>
-      <p className="text-sm mt-1">Select Pay, then tap, insert, or swipe a Stripe test card on the card reader.</p>
-      <p className="text-xs mt-2">Test mode only works with Stripe test cards, for example 4242 4242 4242 4242.</p>
+      <p className="text-sm font-semibold" style={{ color: "#b45309" }}>Card reader · Test mode</p>
+      <p className="text-sm mt-1">Select Pay, then follow the instructions on the card reader.</p>
     </div>
     <div className="rounded-lg p-5 flex justify-between items-center" style={{ border: "1px solid var(--border)", backgroundColor: "var(--secondary)" }}>
       <span className="font-semibold">Registration renewal total</span>
@@ -60,6 +59,5 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy }: 
     </>}
     {status && <p role="status" aria-live="polite" className="text-sm font-semibold">{status}</p>}
     {busy && !paid && <button type="button" onClick={() => controllerRef.current?.cancel?.()} className="px-4 py-2 rounded self-start text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>Cancel card reader payment</button>}
-    <p className="text-xs text-center" style={{ color: "var(--muted-foreground)" }}>Card details are handled by the Stripe card reader, not by this kiosk.</p>
   </div>;
 }
