@@ -70,3 +70,15 @@ input, select, textarea {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Increase the existing kiosk type scale by two pixels. */
+.kiosk-ui {
+  font-size: calc(1rem + 2px);
+  --text-xs: calc(0.75rem + 2px);
+  --text-sm: calc(0.875rem + 2px);
+  --text-base: calc(1rem + 2px);
+  --text-lg: calc(1.125rem + 2px);
+  --text-xl: calc(1.25rem + 2px);
+  --text-2xl: calc(1.5rem + 2px);
+  --text-3xl: calc(1.875rem + 2px);
+}
