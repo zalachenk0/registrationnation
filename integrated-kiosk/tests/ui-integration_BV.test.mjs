@@ -19,6 +19,7 @@ test('partial scans remain editable, while empty results and backend failures ar
   globalThis.fetch = async (url, options) => {
     assert.equal(url, '/api/camera/scan/license');
     assert.equal(options.method, 'POST');
+    assert.equal(options.headers.get('X-Kiosk-Request'), '1');
     return Response.json({ success: true, fields: { customer_first_name: 'Jane' } });
   };
   assert.equal((await requestScan('license', new AbortController().signal)).fields.customer_first_name, 'Jane');

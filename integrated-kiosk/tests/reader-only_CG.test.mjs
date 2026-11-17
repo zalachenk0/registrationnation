@@ -4,8 +4,7 @@
 // What it does: Tests dist/reader-only_CG.js, which makes today's compiled
 //               kiosk form card-reader only: the "enter the card manually"
 //               button is hidden and the messages that mention it are fixed.
-//               Also checks every text it looks for really is in the compiled
-//               form, so a future build with different wording is caught.
+//               Also checks that current builds use the server-driven reader directly.
 // Team-written: Logic written by CG (Cristian Gonzalez).
 // Third-party:  Node's built-in test runner; jsdom (a browser page in Node).
 // ============================================================================
@@ -42,16 +41,22 @@ const READER_STEP = `
   <button type="button" id="manual" style="border:1px solid">${MANUAL_BUTTON}</button>
   <div role="alert"><p id="error"></p><button type="button" id="retry">Retry connecting</button></div>`;
 
-test('every text the script looks for is really in the compiled kiosk form', () => {
+test('the compiled kiosk limits payments to the card reader', () => {
+  const legacyBundle = index.includes('/reader-only_CG.js');
   for (const text of [MANUAL_BUTTON, TOO_SLOW, CANCELED, TRY_AGAIN, ANOTHER_CARD]) {
-    assert.ok(bundle.includes(text), 'not found in ' + bundleName + ': ' + text);
+    assert.equal(bundle.includes(text), legacyBundle, bundleName + ': ' + text);
   }
-});
-
-test('dist/index.html loads the stand-in and this script before the compiled form', () => {
-  const at = (needle) => index.indexOf(needle);
-  assert.ok(at('/stripe-terminal-server_CG.js') > 0 && at('/reader-only_CG.js') > 0);
-  assert.ok(at('/reader-only_CG.js') < at('/' + bundleName) && at('/stripe-terminal-server_CG.js') < at('/' + bundleName));
+  if (legacyBundle) {
+    const bundlePosition = index.indexOf('/' + bundleName);
+    for (const adapter of ['/stripe-terminal-server_CG.js', '/reader-only_CG.js']) {
+      assert.ok(index.indexOf(adapter) > 0 && index.indexOf(adapter) < bundlePosition);
+    }
+  } else {
+    assert.ok(!index.includes('/stripe-terminal-server_CG.js'));
+    for (const operation of ['reader_start', 'reader_status', 'reader_cancel', 'capture_intent']) {
+      assert.ok(bundle.includes(operation), 'missing reader operation: ' + operation);
+    }
+  }
 });
 
 test('the manual button is hidden and can\'t be pressed; the other buttons are untouched', async () => {

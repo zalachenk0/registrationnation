@@ -15,10 +15,15 @@ const { CompletionTimer } = await load(transpile(timerSource));
 delete globalThis.__timerReact;
 
 test('coverage start date and policy type may be blank; required fields and VIN remain validated', () => {
-  const personal = Object.fromEntries(['firstName','lastName','dateOfBirth','email','phone','address','city','state','zip'].map(k=>[k,'value']));
-  const license = { ...Object.fromEntries(['licenseNumber','licenseState','expirationDate','licenseClass','vehicleYear','vehicleMake','vehicleModel','licensePlate'].map(k=>[k,'value'])), vin:'1HGCM82633A004352' };
+  const personal = { firstName:'Jane', lastName:'Sample', dateOfBirth:'1990-05-13', email:'jane@example.com',
+    phone:'830-555-0123', address:'100 Main St', city:'New Braunfels', state:'Texas', zip:'78130', county:'Comal' };
+  const license = { licenseNumber:'12345678', licenseState:'Texas', expirationDate:'2030-12-31',
+    licenseClass:'C', vehicleYear:'2019', vehicleMake:'Honda', vehicleModel:'Accord', licensePlate:'ABC123',
+    vin:'1HGCM82633A004352' };
   const insurance = { provider:'Example', policyNumber:'ABC123', policyHolder:'Sample', endDate:'2027-12-31', startDate:'', coverageType:'' };
   assert.equal(renewalError(personal,license,insurance),'');
+  assert.match(renewalError({...personal, phone:'123'}, license, insurance), /10-digit/);
+  assert.match(renewalError({...personal, dateOfBirth:'2025-02-29'}, license, insurance), /valid dates/);
   assert.match(renewalError(personal,license,{...insurance,endDate:''}),/required/);
   assert.match(renewalError(personal,{...license,vin:'BAD'},insurance),/17-character/);
 });
