@@ -10,14 +10,15 @@
 // Third-party:  React; Tailwind CSS styling; the page layout started from a
 //               Figma design export (see the figma markers in index.html).
 // ============================================================================
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useId } from "react";
 import logoUrl from "./imports/RN_Logo.png";
-import { fillBlank, requestScan, submitPrint, type ScanResult } from "./integration_BV";
+import { fillBlank, requestScan, submitPrint, printStatus, kioskFetch, type PrintStatus, type ScanResult } from "./integration_BV";
 import { PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG"; // [CG]
 import { TerminalPayment } from "./TerminalPayment_CG";
 import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
-import { renewalError } from "./renewal_BV";
+import { displayDate, normalizeDate, renewalError } from "./renewal_BV";
+import { counties, providers, vehicleModels, makes } from "./renewalOptions_BV";
 
 const STATE_CODES = "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split(" ");
 const stateName = (value = "") => value.toUpperCase() === "DC" ? "District of Columbia" : US_STATES[STATE_CODES.indexOf(value.toUpperCase())] || value;
@@ -34,6 +35,7 @@ interface PersonalInfo {
   city: string;
   state: string;
   zip: string;
+  county: string;
 }
 
 interface DriversLicense {
@@ -157,12 +159,42 @@ const inputStyle = {
   color: "var(--foreground)",
 };
 
-function InputEl(props: React.InputHTMLAttributes<HTMLInputElement>) {
+function InputEl({ choices, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { choices?: readonly string[] }) {
+  const listId = useId();
+  const date = props.type === "date";
+  const tel = props.type === "tel";
+  const handleChange: React.ChangeEventHandler<HTMLInputElement> = (event) => {
+    const raw = event.target.value;
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      event.target.value = raw;
+    } else if (date) {
+      const digits = raw.replace(/\D/g, "").slice(0, 8);
+      const parts = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)];
+      event.target.value = normalizeDate(parts.filter(Boolean).join("/"));
+    } else if (tel) {
+      const digits = raw.replace(/\D/g, "").slice(0, 10);
+      event.target.value = [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6)].filter(Boolean).join("-");
+    } else if (props.name === "zip") {
+      const digits = raw.replace(/\D/g, "").slice(0, 9);
+      event.target.value = [digits.slice(0, 5), digits.slice(5)].filter(Boolean).join("-");
+    } else if (props.inputMode === "numeric") {
+      event.target.value = raw.replace(/\D/g, "").slice(0, props.maxLength);
+    }
+    props.onChange?.(event);
+  };
   return (
+    <>
     <input
       {...props}
-      className={inputClass}
-      style={inputStyle}
+      type={date ? "text" : props.type}
+      value={date ? displayDate(String(props.value ?? "")) : props.value}
+      placeholder={date ? "MM/DD/YYYY" : props.placeholder}
+      inputMode={date ? "numeric" : tel ? "tel" : props.inputMode}
+      maxLength={props.maxLength ?? (date ? 10 : tel ? 12 : undefined)}
+      list={choices ? listId : props.list}
+      onChange={handleChange}
+      className={props.className ?? inputClass}
+      style={props.style ?? inputStyle}
       onFocus={(e) => {
         e.currentTarget.style.borderColor = "var(--ring)";
         e.currentTarget.style.boxShadow = "0 0 0 3px rgba(26,58,92,0.1)";
@@ -174,6 +206,8 @@ function InputEl(props: React.InputHTMLAttributes<HTMLInputElement>) {
         props.onBlur?.(e);
       }}
     />
+    {choices && <datalist id={listId}>{choices.map(choice => <option key={choice} value={choice} />)}</datalist>}
+    </>
   );
 }
 
@@ -219,7 +253,7 @@ function Step1({
     const f = result.fields;
     onChange(current => fillBlank(current, {
       firstName: f.customer_first_name, lastName: f.customer_last_name,
-      dateOfBirth: f.date_of_birth, address: f.street_address,
+      dateOfBirth: normalizeDate(f.date_of_birth ?? ""), address: f.street_address,
       city: f.city, state: stateName(f.state), zip: f.zip_code,
     }));
     onLicenseScan(result);
@@ -229,7 +263,7 @@ function Step1({
     <div className="flex flex-col gap-6">
       <ScanPrompt
         title="Scan Your Driver's License"
-        subtitle="We'll extract your name, address, and date of birth automatically. You'll just need to add your email and phone."
+        subtitle="Place your driver’s license under the camera, then scan it."
         docType="license"
         scanned={scanned}
         onScan={handleScan}
@@ -245,7 +279,7 @@ function Step1({
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           <Field label="Email Address" required>
-            <InputEl type="email" placeholder="margaret.sullivan@email.com" value={data.email} onChange={set("email")} />
+            <InputEl maxLength={120} type="email" placeholder="margaret.sullivan@email.com" value={data.email} onChange={set("email")} />
           </Field>
           <Field label="Phone Number" required>
             <InputEl type="tel" placeholder="(555) 867-5309" value={data.phone} onChange={set("phone")} />
@@ -263,21 +297,24 @@ function Step1({
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
             <Field label="First Name" required>
-              <InputEl placeholder="Margaret" value={data.firstName} onChange={set("firstName")} />
+              <InputEl maxLength={35} placeholder="Margaret" value={data.firstName} onChange={set("firstName")} />
             </Field>
             <Field label="Last Name" required>
-              <InputEl placeholder="Sullivan" value={data.lastName} onChange={set("lastName")} />
+              <InputEl maxLength={35} placeholder="Sullivan" value={data.lastName} onChange={set("lastName")} />
             </Field>
           </div>
           <Field label="Date of Birth" required>
             <InputEl type="date" value={data.dateOfBirth} onChange={set("dateOfBirth")} />
           </Field>
+          <Field label="Registration County" required>
+            <InputEl choices={counties} value={data.county} onChange={set("county")} placeholder="Search or enter county" maxLength={45} />
+          </Field>
           <Field label="Street Address" required>
-            <InputEl placeholder="742 Evergreen Terrace" value={data.address} onChange={set("address")} />
+            <InputEl maxLength={80} placeholder="742 Evergreen Terrace" value={data.address} onChange={set("address")} />
           </Field>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-5">
             <Field label="City" required>
-              <InputEl placeholder="Austin" value={data.city} onChange={set("city")} />
+              <InputEl maxLength={45} placeholder="Austin" value={data.city} onChange={set("city")} />
             </Field>
             <Field label="State" required>
               <SelectEl value={data.state} onChange={set("state")}>
@@ -287,7 +324,7 @@ function Step1({
               </SelectEl>
             </Field>
             <Field label="ZIP Code" required>
-              <InputEl placeholder="78701" value={data.zip} onChange={set("zip")} maxLength={10} />
+              <InputEl name="zip" inputMode="numeric" placeholder="78701" value={data.zip} onChange={set("zip")} maxLength={10} />
             </Field>
           </div>
         </div>
@@ -317,7 +354,7 @@ function CameraModal({
     async function refresh() {
       let delay = 200;
       try {
-        const response = await fetch("/api/camera/frame.jpg", { cache: "no-store", signal: controller.signal });
+        const response = await kioskFetch("/api/camera/frame.jpg", { cache: "no-store", signal: controller.signal });
         if (!response.ok) {
           const detail = await response.json();
           throw new Error(detail.error || "Camera unavailable.");
@@ -459,7 +496,6 @@ function ScanPrompt({
   const [cameraOpen, setCameraOpen] = useState(false);
 
   const [error, setError] = useState("");
-  const [recommendation, setRecommendation] = useState("");
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => { pending.current?.abort(); }, []);
 
@@ -476,7 +512,6 @@ function ScanPrompt({
       const result = await requestScan(docType, controller.signal);
       if (controller.signal.aborted) return;
       onScan(result);
-      setRecommendation(result.recommendation || "");
       setState("done");
     } catch (err) {
       if (controller.signal.aborted && !timedOut) return;
@@ -558,8 +593,8 @@ function ScanPrompt({
               </svg>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold" style={{ color: "#2d6636" }}>Document scanned successfully</p>
-              <p className="text-xs truncate" style={{ color: "#3a7d44" }} title={recommendation || undefined}>{recommendation || "Fields below have been pre-filled — review and correct as needed."}</p>
+              <p className="text-sm font-semibold" style={{ color: "#2d6636" }}>{docType === "license" ? "Remove your driver’s license" : "Remove your insurance card"}</p>
+              <p className="text-sm" style={{ color: "#3a7d44" }}>Check the details below.</p>
             </div>
             <button
               onClick={() => { setState("idle"); }}
@@ -594,7 +629,7 @@ function Step2({
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Driver's License</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           <Field label="License Number" required>
-            <InputEl placeholder="D123-4567-8901" value={data.licenseNumber} onChange={set("licenseNumber")} />
+            <InputEl maxLength={24} placeholder="D123-4567-8901" value={data.licenseNumber} onChange={set("licenseNumber")} />
           </Field>
           <Field label="Issuing State" required>
             <SelectEl value={data.licenseState} onChange={set("licenseState")}>
@@ -647,7 +682,7 @@ function Step3({
     setInsuranceScanned(true);
     const f = result.fields;
     onChange(current => fillBlank(current, {
-      provider: f.insurance_company, policyNumber: f.policy_number, endDate: f.insurance_expiration,
+      provider: f.insurance_company, policyNumber: f.policy_number, endDate: normalizeDate(f.insurance_expiration ?? ""),
     }));
     onVehicleChange(current => fillBlank(current, {
       vehicleYear: f.vehicle_year, vehicleMake: f.vehicle_make, vehicleModel: f.vehicle_model,
@@ -659,7 +694,7 @@ function Step3({
     <div className="flex flex-col gap-6">
       <ScanPrompt
         title="Scan Proof of Insurance"
-        subtitle="Upload your insurance card or declaration page to auto-fill your policy and vehicle details below."
+        subtitle="Place your insurance card under the camera, then scan it."
         docType="insurance"
         scanned={insuranceScanned}
         onScan={handleInsuranceScan}
@@ -671,38 +706,32 @@ function Step3({
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Vehicle Information</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
           <Field label="Year" required>
-            <InputEl placeholder="2019" value={vehicleData.vehicleYear} onChange={setVehicle("vehicleYear")} maxLength={4} />
+            <InputEl inputMode="numeric" placeholder="2019" value={vehicleData.vehicleYear} onChange={setVehicle("vehicleYear")} maxLength={4} />
           </Field>
           <Field label="Make" required>
-            <InputEl placeholder="Toyota" value={vehicleData.vehicleMake} onChange={setVehicle("vehicleMake")} />
+            <InputEl choices={makes} maxLength={55} placeholder="Search or enter make" value={vehicleData.vehicleMake} onChange={setVehicle("vehicleMake")} />
           </Field>
           <Field label="Model" required>
-            <InputEl placeholder="Camry" value={vehicleData.vehicleModel} onChange={setVehicle("vehicleModel")} />
+            <InputEl choices={vehicleModels(vehicleData.vehicleMake)} maxLength={60} placeholder="Search or enter model" value={vehicleData.vehicleModel} onChange={setVehicle("vehicleModel")} />
           </Field>
         </div>
         <Field label="VIN" required hint="17-character Vehicle Identification Number">
           <InputEl placeholder="1HGBH41JXMN109186" value={vehicleData.vin} onChange={setVehicle("vin")} maxLength={17} />
         </Field>
         <Field label="Current License Plate" required>
-          <InputEl placeholder="ABC-1234" value={vehicleData.licensePlate} onChange={setVehicle("licensePlate")} />
+          <InputEl maxLength={12} placeholder="ABC-1234" value={vehicleData.licensePlate} onChange={setVehicle("licensePlate")} />
         </Field>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Field label="Insurance Provider" required>
-          <SelectEl value={data.provider} onChange={set("provider")}>
-            <option value="">Select provider</option>
-            {data.provider && !["State Farm", "Geico", "Progressive", "Allstate", "USAA", "Liberty Mutual", "Farmers", "Nationwide", "Travelers", "Other"].includes(data.provider) && <option>{data.provider}</option>}
-            {["State Farm", "Geico", "Progressive", "Allstate", "USAA", "Liberty Mutual", "Nationwide", "Farmers", "Travelers", "Other"].map((p) => (
-              <option key={p}>{p}</option>
-            ))}
-          </SelectEl>
+          <InputEl choices={providers} value={data.provider} onChange={set("provider")} placeholder="Search or enter provider" maxLength={90} />
         </Field>
         <Field label="Policy Number" required>
           <InputEl placeholder="POL-8821049-A" value={data.policyNumber} onChange={set("policyNumber")} />
         </Field>
       </div>
       <Field label="Policy Holder Name" required>
-        <InputEl placeholder="Margaret Sullivan" value={data.policyHolder} onChange={set("policyHolder")} />
+        <InputEl maxLength={70} placeholder="Margaret Sullivan" value={data.policyHolder} onChange={set("policyHolder")} />
       </Field>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Field label="Coverage Start Date (optional)">
@@ -729,7 +758,7 @@ function Step3({
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Agent Information <span className="normal-case font-normal">(optional)</span></p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           <Field label="Agent Name">
-            <InputEl placeholder="Robert Chen" value={data.agentName} onChange={set("agentName")} />
+            <InputEl maxLength={70} placeholder="Robert Chen" value={data.agentName} onChange={set("agentName")} />
           </Field>
           <Field label="Agent Phone">
             <InputEl type="tel" placeholder="(555) 234-5678" value={data.agentPhone} onChange={set("agentPhone")} />
@@ -746,12 +775,18 @@ function EditableRow({
   onChange,
   type = "text",
   options,
+  choices,
+  maxLength,
+  inputMode,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   type?: string;
   options?: string[];
+  choices?: readonly string[];
+  maxLength?: number;
+  inputMode?: "numeric";
 }) {
   const [editing, setEditing] = useState(false);
 
@@ -773,19 +808,23 @@ function EditableRow({
                 {options.map((o) => <option key={o}>{o}</option>)}
               </select>
             ) : (
-              <input
+              <InputEl
                 autoFocus
+                aria-label={label}
+                name={label === "ZIP" ? "zip" : undefined}
+                choices={choices}
+                maxLength={maxLength}
+                inputMode={inputMode}
                 type={type}
                 value={value}
                 onChange={(e) => onChange(e.target.value)}
-                onBlur={() => setEditing(false)}
                 onKeyDown={(e) => e.key === "Enter" && setEditing(false)}
                 className="text-sm rounded px-2 py-1 outline-none text-right"
                 style={{ border: "1.5px solid var(--accent)", backgroundColor: "var(--card)", color: "var(--foreground)", fontFamily: "'Instrument Sans', sans-serif", minWidth: 0, maxWidth: 200 }}
               />
             )}
             <button
-              onMouseDown={() => setEditing(false)}
+              onClick={() => setEditing(false)}
               className="shrink-0 text-xs font-semibold px-2 py-1 rounded transition-colors"
               style={{ backgroundColor: "var(--accent)", color: "#fff" }}
             >
@@ -795,7 +834,7 @@ function EditableRow({
         ) : (
           <>
             <span className="text-sm font-medium text-right truncate" style={{ color: value ? "var(--foreground)" : "var(--muted-foreground)" }}>
-              {value || "—"}
+              {(type === "date" ? displayDate(value) : value) || "—"}
             </span>
             <button
               onClick={() => setEditing(true)}
@@ -858,33 +897,34 @@ function Step4({
       </div>
 
       <EditableSection title="Personal Information">
-        <EditableRow label="First Name"    value={personal.firstName}   onChange={sp("firstName")} />
-        <EditableRow label="Last Name"     value={personal.lastName}    onChange={sp("lastName")} />
+        <EditableRow maxLength={35} label="First Name"    value={personal.firstName}   onChange={sp("firstName")} />
+        <EditableRow maxLength={35} label="Last Name"     value={personal.lastName}    onChange={sp("lastName")} />
         <EditableRow label="Date of Birth" value={personal.dateOfBirth} onChange={sp("dateOfBirth")} type="date" />
-        <EditableRow label="Email"         value={personal.email}       onChange={sp("email")} type="email" />
+        <EditableRow maxLength={120} label="Email"         value={personal.email}       onChange={sp("email")} type="email" />
         <EditableRow label="Phone"         value={personal.phone}       onChange={sp("phone")} type="tel" />
-        <EditableRow label="Address"       value={personal.address}     onChange={sp("address")} />
-        <EditableRow label="City"          value={personal.city}        onChange={sp("city")} />
+        <EditableRow maxLength={80} label="Address"       value={personal.address}     onChange={sp("address")} />
+        <EditableRow maxLength={45} label="City"          value={personal.city}        onChange={sp("city")} />
         <EditableRow label="State"         value={personal.state}       onChange={sp("state")} options={US_STATES} />
-        <EditableRow label="ZIP"           value={personal.zip}         onChange={sp("zip")} />
+        <EditableRow label="Registration County" value={personal.county} onChange={sp("county")} choices={counties} maxLength={45} />
+        <EditableRow maxLength={10} inputMode="numeric" label="ZIP"           value={personal.zip}         onChange={sp("zip")} />
       </EditableSection>
 
       <EditableSection title="Driver's License">
-        <EditableRow label="License Number" value={license.licenseNumber}  onChange={sl("licenseNumber")} />
+        <EditableRow maxLength={24} label="License Number" value={license.licenseNumber}  onChange={sl("licenseNumber")} />
         <EditableRow label="Issuing State"  value={license.licenseState}   onChange={sl("licenseState")} options={US_STATES} />
         <EditableRow label="Expiration"     value={license.expirationDate} onChange={sl("expirationDate")} type="date" />
         <EditableRow label="Class"          value={license.licenseClass}   onChange={sl("licenseClass")} options={["A","B","C","D","M"]} />
-        <EditableRow label="Year"           value={license.vehicleYear}    onChange={sl("vehicleYear")} />
-        <EditableRow label="Make"           value={license.vehicleMake}    onChange={sl("vehicleMake")} />
-        <EditableRow label="Model"          value={license.vehicleModel}   onChange={sl("vehicleModel")} />
-        <EditableRow label="VIN"            value={license.vin}            onChange={sl("vin")} />
-        <EditableRow label="License Plate"  value={license.licensePlate}   onChange={sl("licensePlate")} />
+        <EditableRow maxLength={4} inputMode="numeric" label="Year"           value={license.vehicleYear}    onChange={sl("vehicleYear")} />
+        <EditableRow maxLength={55} choices={makes} label="Make"           value={license.vehicleMake}    onChange={sl("vehicleMake")} />
+        <EditableRow maxLength={60} choices={vehicleModels(license.vehicleMake)} label="Model"          value={license.vehicleModel}   onChange={sl("vehicleModel")} />
+        <EditableRow maxLength={17} label="VIN"            value={license.vin}            onChange={sl("vin")} />
+        <EditableRow maxLength={12} label="License Plate"  value={license.licensePlate}   onChange={sl("licensePlate")} />
       </EditableSection>
 
       <EditableSection title="Insurance">
-        <EditableRow label="Provider"      value={insurance.provider}     onChange={si("provider")} />
+        <EditableRow maxLength={90} choices={providers} label="Provider"      value={insurance.provider}     onChange={si("provider")} />
         <EditableRow label="Policy Number" value={insurance.policyNumber} onChange={si("policyNumber")} />
-        <EditableRow label="Policy Holder" value={insurance.policyHolder} onChange={si("policyHolder")} />
+        <EditableRow maxLength={70} label="Policy Holder" value={insurance.policyHolder} onChange={si("policyHolder")} />
         <EditableRow label="Start Date (optional)"    value={insurance.startDate}    onChange={si("startDate")} type="date" />
         <EditableRow label="End Date"      value={insurance.endDate}      onChange={si("endDate")} type="date" />
         <EditableRow label="Policy Type (optional)" value={insurance.coverageType} onChange={si("coverageType")} options={["","liability","collision","comprehensive","full","uninsured"]} />
@@ -909,18 +949,29 @@ function AdminLogin({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState(false);
   const [shaking, setShaking] = useState(false);
 
-  const attempt = () => {
-    if (username === "blastervee" && password === "Nikolai01") {
+  const [busy, setBusy] = useState(false);
+  const attempt = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const response = await kioskFetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!response.ok) throw new Error("Login failed");
       onLogin();
-    } else {
+    } catch {
       setError(true);
       setShaking(true);
       setTimeout(() => setShaking(false), 500);
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4" style={{ backgroundColor: "var(--primary)" }}>
+    <div className="kiosk-ui min-h-screen flex flex-col items-center justify-center px-4" style={{ backgroundColor: "var(--primary)" }}>
       <style>{`@keyframes shake { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-6px)} 40%,80%{transform:translateX(6px)} }`}</style>
       <div className="w-full max-w-sm flex flex-col items-center gap-8">
         <div className="flex flex-col items-center gap-3">
@@ -975,6 +1026,7 @@ function AdminLogin({ onLogin }: { onLogin: () => void }) {
 
           <button
             onClick={attempt}
+            disabled={busy}
             className="w-full py-3 rounded-lg text-sm font-semibold transition-all duration-150"
             style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
             onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#d95c1a"; }}
@@ -996,6 +1048,24 @@ export default function App() {
   const [authed, setAuthed] = useState(false);
   const [step, setStep] = useState<Step>(1);
   const [submitted, setSubmitted] = useState(false);
+  const [initials, setInitials] = useState("");
+  const [printResult, setPrintResult] = useState<PrintStatus | null>(null);
+  const [printNotice, setPrintNotice] = useState("");
+  const [checkingSession, setCheckingSession] = useState(true);
+  useEffect(() => {
+    const controller = new AbortController();
+    const expire = () => setAuthed(false);
+    window.addEventListener("kiosk-session-expired", expire);
+    kioskFetch("/api/auth/session", { signal: controller.signal })
+      .then(response => { if (!controller.signal.aborted) setAuthed(response.ok); })
+      .catch(() => {})
+      .finally(() => { if (!controller.signal.aborted) setCheckingSession(false); });
+    return () => {
+      controller.abort();
+      window.removeEventListener("kiosk-session-expired", expire);
+    };
+  }, []);
+
 
   const cardEntry = useRef<CardEntry | null>(null);
   const [paymentReady, setPaymentReady] = useState(false);
@@ -1011,7 +1081,7 @@ export default function App() {
 
   const [personal, setPersonal] = useState<PersonalInfo>({
     firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "",
-    address: "", city: "", state: "", zip: "",
+    address: "", city: "", state: "", zip: "", county: "",
   });
   const [license, setLicense] = useState<DriversLicense>({
     licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "",
@@ -1024,7 +1094,7 @@ export default function App() {
     const f = result.fields;
     setLicense(current => fillBlank(current, {
       licenseNumber: f.license_number, licenseState: stateName(f.state),
-      expirationDate: f.license_expiration, licenseClass: f.license_class,
+      expirationDate: normalizeDate(f.license_expiration ?? ""), licenseClass: f.license_class,
     }));
   };
   const [insurance, setInsurance] = useState<InsuranceInfo>({
@@ -1034,9 +1104,35 @@ export default function App() {
 
   const [printing, setPrinting] = useState(false);
   const [paid, setPaid] = useState<PaymentResult | null>(null);
+  const showingPrint = submitted || (printing && Boolean(paid));
+  useEffect(() => { window.scrollTo(0, 0); }, [step, showingPrint]);
   const [paymentStatus, setPaymentStatus] = useState("");
   const printPending = useRef(false);
   const printReference = useRef(sessionStorage.getItem("kiosk-payment-reference") || "");
+  useEffect(() => {
+    if (!submitted || !authed) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const started = Date.now();
+    const poll = async () => {
+      try {
+        const result = await printStatus(printReference.current, controller.signal);
+        if (controller.signal.aborted) return;
+        setPrintResult(result);
+        setPrintNotice(Date.now() - started > 45000 && result.state !== "completed"
+          ? "Still waiting for the printer. Ask a staff member for help." : "");
+        if (["cancelled", "aborted", "unknown", "failed", "uncertain"].includes(result.state) ||
+          (result.state === "completed" && ["sent", "failed", "uncertain", "skipped"].includes(result.email_state))) return;
+      } catch {
+        if (controller.signal.aborted) return;
+        setPrintNotice("Checking the printer. Ask a staff member if you need help.");
+      }
+      timer = setTimeout(poll, 1500);
+    };
+    void poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [submitted, authed]);
+
   // builds what we send to monday.com. the server only forwards the fields listed in COLUMN_MAP (monday_service_CG.py)
   // [CG] builds the record that goes to Monday.com (the field choices were agreed with the sponsor)
   const buildCrmPayload = (confirmation: string, paymentIntentId: string) => {
@@ -1098,10 +1194,13 @@ export default function App() {
   const handlePrint = async () => {
     if (printPending.current) return;
     const error = renewalError(personal, license, insurance);
-    if (error) { window.alert(error); return; }
+    if (error || !initials) { window.alert(error || "Enter your initials before paying."); return; }
     printPending.current = true;
     setPrinting(true);
-    if (!printReference.current) printReference.current = `REG-${crypto.randomUUID().toUpperCase()}`;
+    if (!printReference.current) {
+      const utc = new Date().toISOString().replace(/[-:.]/g, "");
+      printReference.current = `${utc}-RN-Kiosk-1-${crypto.randomUUID().replace(/-/g, "")}`;
+    }
     sessionStorage.setItem("kiosk-payment-reference", printReference.current);
     let confirmed = paid;
     try {
@@ -1110,12 +1209,17 @@ export default function App() {
         vehicle_make: license.vehicleMake, vehicle_model: license.vehicleModel,
         vin: license.vin, confirmation_number: printReference.current,
         receipt_email: personal.email.trim() };  // Stripe emails its receipt to this when the payment is captured
-      if (!paid && !cardEntry.current) throw new Error("Wait for the card reader or card form to finish loading, then retry.");
+      if (!paid && !cardEntry.current) throw new Error("Wait for the card reader to connect.");
       confirmed = paid || await cardEntry.current!.pay(payload, setPaymentStatus);
       if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
       setPaid(confirmed);
       setPaymentStatus("Test payment confirmed. Sending to printer…");
-      await submitPrint(payload);
+      const { address, city, state, zip, county, phone, email } = personal;
+      setPrintResult(await submitPrint({
+        ...payload,
+        form_details: JSON.stringify({ personal: { address, city, state, zip, county, phone, email } }),
+        initials,
+      }));
       setSubmitted(true);
 
       // log the finished renewal to monday.com. runs in the background so the customer never waits on it
@@ -1139,22 +1243,26 @@ export default function App() {
   };
 
   const stepSubtitles: Record<Step, string> = {
-    1: "Scan your driver's license — we'll fill in the rest. Just add your email and phone.",
-    2: "Confirm the driver's license details captured by the scanner.",
-    3: "Scan your proof of insurance to fill in your policy and vehicle information.",
+    1: "Scan your driver’s license and enter your contact information.",
+    2: "Check your driver’s license details.",
+    3: "Scan your insurance card and check your vehicle details.",
     4: "Review all information before proceeding to payment.",
     5: "Complete your $114.25 renewal payment securely.",
   };
 
+  if (checkingSession) return <p role="status">Opening kiosk…</p>;
   if (!authed) return <AdminLogin onLogin={() => setAuthed(true)} />;
 
-  if (submitted) {
+  if (showingPrint) {
     const confNum = printReference.current;
+    const printComplete = printResult?.state === "completed";
+    const printStopped = ["aborted", "cancelled", "unknown", "failed", "uncertain"].includes(printResult?.state ?? "");
+    const emailState = printResult?.email_state;
     return (
-      <div className="min-h-screen flex flex-col" style={{ backgroundColor: "var(--background)" }}>
+      <div className="kiosk-ui min-h-screen flex flex-col" style={{ backgroundColor: "var(--background)" }}>
         {/* Header */}
         <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
-          <div className="max-w-2xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
             <img src={logoUrl} alt="Registration Nation" className="h-12 w-auto object-contain" />
             <div className="text-right">
               <p className="text-xs font-semibold tracking-wider uppercase" style={{ color: "var(--muted-foreground)" }}>Texas Tag & Title</p>
@@ -1226,32 +1334,19 @@ export default function App() {
 
             {/* Status text */}
             <div className="text-center flex flex-col gap-2">
-              <h2 className="text-3xl" style={{ color: "var(--foreground)" }}>Payment Complete — Printing Queued</h2>
-              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-                Your $114.25 Stripe test payment succeeded and the mock sticker and receipt were accepted by the print queue. No real money was charged. Check the printer to collect them.
+              <h2 className="text-3xl" role="status">
+                {printComplete ? "Collect your sticker and receipt" : printStopped ? "Ask a staff member for help" : "Printing your sticker and receipt…"}
+              </h2>
+              <p className="text-sm">
+                {printComplete ? "Take both pages from the printer." : printStopped ? "Your payment went through. Please do not pay again." : "Your payment went through. Please wait by the printer."}
               </p>
-              {paid?.receiptEmail ? (
-                <p className="text-xs mt-1 flex items-center justify-center gap-1.5" style={{ color: "var(--muted-foreground)" }}>
-                  <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0 }}>
-                    <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-                    <path d="M1.5 3.5l5 3.5 5-3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  Stripe will email a receipt to <strong className="ml-0.5">{paid.receiptEmail}</strong>
-                </p>
-              ) : personal.email ? (
-                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-                  No receipt email could be set up for <strong>{personal.email}</strong>. Check the address on the Review step.
-                </p>
-              ) : (
-                <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-                  No email address was entered, so no receipt email is sent.
-                </p>
-              )}
-              {paid?.receiptEmail && (
-                <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                  In Stripe test mode, receipts are only delivered to the Stripe account owner's own email address.
-                </p>
-              )}
+              {printNotice && <p role="status">{printNotice}</p>}
+              {printComplete && <p className="text-sm" role="status">
+                {emailState === "sent" ? `Company receipt sent to ${personal.email}.`
+                  : ["failed", "uncertain"].includes(emailState ?? "") ? "The email needs staff attention. Your printed receipt is ready."
+                  : emailState === "skipped" ? "Your printed receipt is ready."
+                  : "Preparing your receipt email…"}
+              </p>}
             </div>
 
             {/* Summary card */}
@@ -1266,8 +1361,8 @@ export default function App() {
                   { label: "Plate", value: license.licensePlate },
                   { label: "Amount Paid", value: "$114.25 (Stripe test)" },
                   { label: "Stripe Payment", value: paid?.id || "—" },
-                  { label: "Receipt email", value: paid?.receiptEmail || "Not sent" },
-                  { label: "Confirmation #", value: confNum },
+                  { label: "Payment method", value: "Stripe Terminal" },
+                  { label: "Transaction ID", value: confNum },
                 ].map((r) => (
                   <div key={r.label} className="flex justify-between items-center py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
                     <span className="text-sm" style={{ color: "var(--muted-foreground)" }}>{r.label}</span>
@@ -1295,7 +1390,7 @@ export default function App() {
               </div>
             )}
 
-            <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />
+            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
           </div>
         </div>
       </div>
@@ -1303,10 +1398,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: "var(--background)" }}>
+    <div className="kiosk-ui min-h-screen" style={{ backgroundColor: "var(--background)" }}>
       {/* Header */}
       <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
-        <div className="max-w-2xl mx-auto px-6 py-3 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
           <img
             src={logoUrl}
             alt="Registration Nation"
@@ -1319,7 +1414,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-2xl mx-auto px-6 py-10">
+      <main className="max-w-6xl mx-auto px-6 py-10">
         <ProgressBar current={step} />
 
         <div className="mb-8">
@@ -1335,6 +1430,16 @@ export default function App() {
           {step === 2 && <Step2 data={license} onChange={setLicense} />}
           {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicleData={license} onVehicleChange={setLicense} />}
           {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
+          {step === 4 && <section className="mt-8 border-t pt-6 space-y-3">
+            <h2 className="text-xl">Customer signature</h2>
+            <p>By signing I confirm that all information with this transaction is true and correct. I understand, I have until 12pm the next business day to make any corrections at no charge. After 12pm, I will be responsible for all applicable charges for any changes. I also understand that if this transaction is rejected by the county for any reason, a rejection fee may apply. I will be notified of the rejection and given the opportunity to resolve any issues; however, any fees assessed as a result of the rejection are my responsibility.</p>
+            <p>I also understand that this information is used to ensure your transaction goes well. We will use this information to contact you if any issues arise before the transaction is submitted to the State of Texas. We may use this information to remind you of your annual vehicle registration.</p>
+            <label className="block max-w-xs">
+              Enter your initials to sign
+              <InputEl value={initials} autoCapitalize="characters" maxLength={8} required
+                onChange={event => setInitials(event.target.value.replace(/[^a-z]/gi, "").toUpperCase())} />
+            </label>
+          </section>}
         {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} />}
         </div>
 
@@ -1370,7 +1475,11 @@ export default function App() {
             </button>
           ) : step === 4 ? (
             <button
-              onClick={() => setStep(5)}
+              onClick={() => {
+                const error = renewalError(personal, license, insurance);
+                if (error || !initials) { window.alert(error || "Enter your initials before continuing."); return; }
+                setStep(5);
+              }}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
               style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#142e4a"; }}
@@ -1399,7 +1508,7 @@ export default function App() {
         </div>
 
         <p className="text-xs text-center mt-8" style={{ color: "var(--muted-foreground)" }}>
-          Fields marked with <span style={{ color: "#e05a1a" }}>*</span> are required. Document scanning runs locally; card details are collected securely by Stripe.
+          Fields marked with <span style={{ color: "#e05a1a" }}>*</span> are required. 
         </p>
       </main>
     </div>
