@@ -63,6 +63,11 @@ def document_data(data):
     result = validate(data)
     if data.get('form_details') is not None:
         result['form_details'] = parse_details(data['form_details'])
+    initials = data.get('initials')
+    if initials is not None:
+        if not isinstance(initials, str) or not re.fullmatch(r'[A-Z]{1,8}', initials):
+            raise ValueError('Enter valid customer initials.')
+        result['initials'] = initials
     return result
 
 

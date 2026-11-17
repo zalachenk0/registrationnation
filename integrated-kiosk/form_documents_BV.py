@@ -13,7 +13,7 @@ import json
 from xml.sax.saxutils import escape
 
 GROUPS = {
-    'personal': ('Personal information', {'firstName': 'First name', 'lastName': 'Last name', 'dateOfBirth': 'Date of birth', 'email': 'Email', 'phone': 'Phone', 'address': 'Street address', 'city': 'City', 'state': 'State', 'zip': 'ZIP code'}),
+    'personal': ('Personal information', {'firstName': 'First name', 'lastName': 'Last name', 'dateOfBirth': 'Date of birth', 'email': 'Email', 'phone': 'Phone', 'address': 'Street address', 'city': 'City', 'state': 'State', 'zip': 'ZIP code', 'county': 'Registration county'}),
     'license': ("Driver's license and vehicle", {'licenseNumber': 'License number', 'licenseState': 'Issuing state', 'expirationDate': 'License expiration', 'licenseClass': 'License class', 'vehicleYear': 'Vehicle year', 'vehicleMake': 'Make', 'vehicleModel': 'Model', 'vin': 'VIN', 'licensePlate': 'License plate'}),
     'insurance': ('Insurance information', {'provider': 'Provider', 'policyNumber': 'Policy number', 'policyHolder': 'Policy holder', 'startDate': 'Start date', 'endDate': 'End date', 'coverageType': 'Coverage type', 'agentName': 'Agent name', 'agentPhone': 'Agent phone'}),
 }
@@ -38,6 +38,8 @@ def parse_details(raw):
             raise ValueError('Invalid form section.')
         result[group] = {}
         for key in fields:
+            if key == 'county' and key not in values:
+                continue
             value = values.get(key, '')
             if not isinstance(value, str) or len(value) > 200:
                 raise ValueError('Form values must contain at most 200 characters.')

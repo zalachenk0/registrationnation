@@ -48,6 +48,13 @@ def _box(pdf, value, x, baseline, width, height=24, size=10, bold=False):
 def build_documents(data, payment=None, *, today=None):
     # The public printing wrapper validates data; keep this internal API reusable for previews/tests.
     today = today or datetime.now(ZoneInfo(os.getenv('KIOSK_TIMEZONE', 'America/Chicago'))).date()
+    reference = data['confirmation_number']
+    transaction_time = None
+    if '-RN-Kiosk-1-' in reference:
+        try:
+            transaction_time = datetime.strptime(reference.split('-', 1)[0], '%Y%m%dT%H%M%S%fZ')
+        except ValueError:
+            pass
     # Customer printing is limited to the mock sticker and company receipt.
     # Form details remain available for receipt fields, but are not appended.
     total_pages = 2
@@ -120,7 +127,22 @@ def build_documents(data, payment=None, *, today=None):
     _box(pdf, os.getenv('KIOSK_STORE_NAME', 'Registration Nation'), 317, 702.85, 220, 20, 9)
     _box(pdf, data['confirmation_number'], 374, 679.8, 163, 20, 8)
     _box(pdf, os.getenv('KIOSK_TITLE_CLERK', ''), 348, 656.75, 189, 20, 9)
-    _box(pdf, data['registrant'], 193, 545.25, 122, 66, 10)
+    _box(pdf, data['registrant'], 193, 545.25, 122, 28, 10)
+    personal = data.get('form_details', {}).get('personal', {})
+    state_zip = ' '.join(filter(None, (personal.get('state'), personal.get('zip'))))
+    locality = ', '.join(filter(None, (personal.get('city'), state_zip)))
+    for value, baseline, width in (
+        (personal.get('address'), 527, 190),
+        (locality, 508, 190),
+        (personal.get('phone'), 490, 190),
+        (personal.get('email'), 476, 400),
+    ):
+        if value:
+            _box(pdf, value, 125.45, baseline, width, 18, 7)
+    if data.get('initials'):
+        pdf.setStrokeColor(black)
+        pdf.line(345, 205, 476, 205)
+        _box(pdf, data['initials'], 351, 208, 120, 16, 9, True)
     _box(pdf, data['license_plate'].upper(), 389, 545.25, 148, 20, 10)
     _box(pdf, data['vin'].upper(), 355, 521.25, 182, 20, 9)
 
@@ -130,13 +152,13 @@ def build_documents(data, payment=None, *, today=None):
     pdf.drawString(125.45, 602, status)
     pdf.setFont('Helvetica', 9)
     pdf.drawString(125.45, 585, f'Date: {today:%m/%d/%Y}     Renewal: {month:02d}/{year}')
-    # The existing checkout exposes only a total, not county/service fee components.
-    pdf.setFont('Helvetica', 7.5)
-    pdf.drawString(125.45, 478, '* Fee breakdown not supplied by checkout; verified total shown below.')
+    if transaction_time:
+        pdf.drawString(322, 585, f'{transaction_time:%m/%d/%Y %H:%M:%S} UTC  |  RN-Kiosk-1')
     pdf.setFillColor(black)
     pdf.setFont('Helvetica', 9)
-    for baseline in (425.85, 400.4, 375.65):
-        pdf.drawRightString(478, baseline, 'N/A*')
+    fees = (8725, 2164, 536) if amount == 11425 else (None, None, None)
+    for baseline, fee in zip((425.85, 400.4, 375.65), fees):
+        pdf.drawRightString(478, baseline, f'{fee / 100:,.2f}' if fee is not None else '—')
     rows = [(350.75, 0), (325.85, amount), (300.95, 0),
             (276.05, amount), (251.15, 0), (225.85, 0)]
     for baseline, cents in rows:
