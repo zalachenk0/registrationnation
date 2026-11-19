@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import io
 import os
-import re
+import re  # [CG]
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -51,15 +51,15 @@ def build_documents(data, payment=None, *, today=None):
     # The public printing wrapper validates data; keep this internal API reusable for previews/tests.
     today = today or datetime.now(ZoneInfo(os.getenv('KIOSK_TIMEZONE', 'America/Chicago'))).date()
     reference = data['confirmation_number']
-    transaction_time, kiosk = None, 'RN-Kiosk-1'
-    short = re.fullmatch(r'RN(\d{1,3})-(\d{8})-(\d{6})-[0-9A-F]{6}', reference)  # [CG] RN1-20261119-075512-A3F9C2: kiosk, UTC date and time, random
+    transaction_time, kiosk = None, 'RN-Kiosk-1'  # [CG] kiosk name is read from the ID now
+    short = re.fullmatch(r'RN(\d{1,3})-(\d{8})-(\d{6})-[0-9A-F]{6}', reference)  # [CG] RN1-20261119-075512-A3F9C2 = kiosk, UTC date, UTC time, random
     if short:
         try:
             transaction_time = datetime.strptime(short[2] + short[3], '%Y%m%d%H%M%S')
             kiosk = f'RN-Kiosk-{int(short[1])}'
         except ValueError:
             pass
-    elif '-RN-Kiosk-1-' in reference:  # the longer ID used before Nov 19, still read so a reprint of an older renewal shows its time
+    elif '-RN-Kiosk-1-' in reference:  # [CG] old long ID, still read so reprints of older renewals show the time
         try:
             transaction_time = datetime.strptime(reference.split('-', 1)[0], '%Y%m%dT%H%M%S%fZ')
         except ValueError:

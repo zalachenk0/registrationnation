@@ -3,9 +3,9 @@
 // Written by:   CG (Cristian Gonzalez)
 // What it does: Card reader payment panel for the Stripe reader.
 // Team-written: Logic written by CG (Cristian Gonzalez). Outside code is used
-//               only through the third-party sources listed below. BV (Blas
-//               Vargas) shortened the reader instructions on Nov 17; that text
-//               is replaced by the larger instructions below.
+//               only through the third-party sources listed below. BV shortened
+//               the reader instructions on Nov 17; the new status panel
+//               replaced that text.
 // Third-party:  React; Stripe (server-driven reader), through terminal_CG.ts.
 // ============================================================================
 import { useEffect, useState, type MutableRefObject } from "react";
@@ -18,7 +18,7 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy, er
   controllerRef: MutableRefObject<CardEntry | null>;
   onReady: (ready: boolean) => void;
   status: string; paid: boolean; busy: boolean;
-  error?: string;  // why the last payment attempt stopped (declined, canceled, timed out)
+  error?: string;  // why the last attempt stopped (declined, canceled, timed out)
 }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -41,8 +41,8 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy, er
   }, [attempt, controllerRef, onReady, paid]);
 
   const connected = !loading && !error;
-  // [CG] the sponsor asked for the card reader instructions to stand out. One big panel says what to do right now:
-  // wait, tap the card, or what went wrong. The payment starts on its own once the reader is connected (App_BV_CG.tsx)
+  // sponsor wanted the reader instructions to stand out more. one big panel that says what to do right now:
+  // wait, tap your card, or what went wrong. payment starts on its own once the reader connects (App_BV_CG.tsx)
   const waitingForCard = busy && !paid && /tap|insert|swipe/i.test(status);
   const headline = paid ? "Payment approved"
     : payError ? "Payment didn't go through"

@@ -1,16 +1,13 @@
 // ============================================================================
 // File:         TouchKeyboard_BV_CG.tsx
-// Written by:   BV (Blas Vargas, the keyboard's design and behavior); CG
-//               (Cristian Gonzalez, brought it back into src/)
-// What it does: The on-screen keyboard. The kiosk has no physical keyboard, so
-//               tapping any text field opens this one at the bottom of the
-//               screen. A number pad opens for phone, ZIP, year and date
-//               fields.
-// Team-written: Logic written by BV; it was in the compiled form the Pi ran
-//               until Nov 17 but not in src/, so the Nov 17 rebuild from src/
-//               dropped it. CG rewrote it from that compiled form as readable
-//               source, same keys and behavior, plus the number-pad marker
-//               (data-keypad) tagged [CG].
+// Written by:   BV (Blas Vargas, the keyboard itself); CG (Cristian Gonzalez,
+//               put it back in src/ and fixed the missed-tap bug)
+// What it does: On-screen keyboard. The kiosk has no real keyboard, so tapping
+//               a text field pops this up at the bottom. Phone, ZIP, year and
+//               date fields get a number pad.
+// Team-written: Logic written by BV. It only existed in the old compiled build,
+//               so the Nov 17 rebuild lost it; CG rewrote it from that build
+//               with the same keys and behavior. CG's changes are tagged [CG].
 // Third-party:  React.
 // ============================================================================
 import { useEffect, useRef, useState } from "react";
@@ -22,7 +19,7 @@ function typeable(target: EventTarget | null): target is HTMLInputElement | HTML
     && !target.disabled && !target.readOnly;
 }
 
-// types one key into the field the way a real keyboard would, so React's onChange (and its formatting) still runs
+// types a key like a real keyboard would, so React's onChange and formatting still fire
 function press(field: HTMLInputElement | HTMLTextAreaElement, key: string) {
   const start = field.selectionStart ?? field.value.length;
   const end = field.selectionEnd ?? start;
@@ -36,7 +33,7 @@ function press(field: HTMLInputElement | HTMLTextAreaElement, key: string) {
   try { field.setSelectionRange(from + text.length, from + text.length); } catch { /* email fields have no cursor position */ }
 }
 
-// [CG] a field asks for the number pad with data-keypad="numeric" (InputEl sets it); the old name/placeholder guess stays as a fallback
+// [CG] InputEl marks number fields with data-keypad="numeric". the old name/placeholder guess is the fallback
 function wantsNumbers(field: HTMLInputElement | HTMLTextAreaElement): boolean {
   return field.dataset.keypad === "numeric" || field.type === "tel" || /zip|postal|year/i.test(field.name + field.id + field.placeholder);
 }
@@ -48,7 +45,7 @@ export function TouchKeyboard() {
   const panel = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // stop the system's own keyboard from opening too
+    // keeps the OS keyboard from popping up too
     const quiet = () => document.querySelectorAll("input, textarea").forEach(element => {
       if (typeable(element)) (element as HTMLInputElement).inputMode = "none";
     });
@@ -57,14 +54,14 @@ export function TouchKeyboard() {
     watcher.observe(document.getElementById("root")!, { childList: true, subtree: true });
     const focusIn = (event: FocusEvent) => {
       if (typeable(event.target)) { setField(event.target); setSymbols(false); setShift(false); }
-      // [CG] a button taking focus doesn't close the keyboard here (Chromium focuses it on touch-down); the click handler does
+      // [CG] buttons get focus on touch-down in Chromium, so closing happens in the click handler instead
     };
     const pointerDown = (event: PointerEvent) => {
       if (event.target instanceof Node && panel.current?.contains(event.target)) return;
       if (typeable(event.target)) setField(event.target);
     };
-    // [CG] tapping anything else closes the keyboard, but only once the tap is finished. Closing it on touch-down (as the
-    // earlier build did) shrank the page under the finger, so a tap on Continue while typing could miss the button
+    // [CG] close the keyboard after the tap finishes, not on touch-down. closing it early shifted the page under the
+    // finger and taps on Continue would miss
     const tapped = (event: MouseEvent) => {
       if (event.target instanceof Node && panel.current?.contains(event.target)) return;
       if (!typeable(event.target)) setField(null);
@@ -83,7 +80,7 @@ export function TouchKeyboard() {
     };
   }, []);
 
-  // keeps the field being typed in visible above the keyboard
+  // keeps the field you're typing in visible above the keyboard
   useEffect(() => {
     if (!field || !panel.current) return;
     const resize = new ResizeObserver(() => {

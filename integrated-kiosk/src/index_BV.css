@@ -3,8 +3,9 @@
  * Written by:   BV (Blas Vargas); CG (the touch keyboard styles copied back,
  *               tagged [CG])
  * What it does: Page styling.
- * Team-written: Logic written by BV (Blas Vargas). Outside code is used only
- *               through the third-party sources listed below.
+ * Team-written: Logic written by BV (Blas Vargas); CG (lines tagged [CG]).
+ *               Outside code is used only through the third-party sources
+ *               listed below.
  * Third-party:  Tailwind CSS.
  * ============================================================================ */
 @import url('/fonts/fonts.css');
@@ -84,8 +85,8 @@ input, select, textarea {
   --text-3xl: calc(1.875rem + 2px);
 }
 
-/* [CG] the on-screen keyboard (TouchKeyboard_BV_CG.tsx). BV's styles, copied back from the compiled form the Pi ran
-   before Nov 17, because the Nov 17 rebuild from src/ dropped them. The page leaves room at the bottom for it. */
+/* [CG] touch keyboard styles (TouchKeyboard_BV_CG.tsx). BV's originals, copied back in from the old build.
+   the page leaves room at the bottom so the keyboard doesn't cover the field */
 html { scroll-padding-bottom: var(--touch-keyboard-height, 0px); }
 body { padding-bottom: var(--touch-keyboard-height, 0px); }
 .touch-keyboard {

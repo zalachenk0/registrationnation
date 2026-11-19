@@ -23,8 +23,8 @@ function validDate(value: string): boolean {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-// [CG] the same checks as before, split by form step, so Continue on each step can stop the customer at that step's blanks
-// instead of letting them skip ahead and only find out at Review. renewalError runs all three, exactly as it did
+// [CG] same checks as before, split up by step so Continue can stop people at that step instead of at Review.
+// renewalError still runs all three like it used to
 export type FormStep = 1 | 2 | 3;
 export const STEP_FIELDS: Record<FormStep, { personal?: string[]; license?: string[]; insurance?: string[] }> = {
   1: { personal: ["email", "phone", "firstName", "lastName", "dateOfBirth", "county", "address", "city", "state", "zip"] },
@@ -34,7 +34,7 @@ export const STEP_FIELDS: Record<FormStep, { personal?: string[]; license?: stri
 
 const values = (data: object, keys: string[]) => keys.map(key => String((data as Record<string, unknown>)[key] ?? ""));
 
-// the first required field on this step that's still blank, so the screen can point at it
+// [CG] first blank required field on this step, so the screen can point at it
 export function firstBlank(step: FormStep, personal: object, license: object, insurance: object): string {
   const groups = STEP_FIELDS[step];
   for (const [data, keys] of [[personal, groups.personal], [license, groups.license], [insurance, groups.insurance]] as const) {
@@ -43,7 +43,7 @@ export function firstBlank(step: FormStep, personal: object, license: object, in
   return "";
 }
 
-export function stepError(step: FormStep, personal: object, license: object, insurance: object): string {
+export function stepError(step: FormStep, personal: object, license: object, insurance: object): string {  // [CG]
   if (firstBlank(step, personal, license, insurance)) {
     return step === 1 ? "Fill in every field marked * on this page before continuing."
       : step === 2 ? "Fill in every driver's license field marked * before continuing."
@@ -72,8 +72,7 @@ export function stepError(step: FormStep, personal: object, license: object, ins
   return "";
 }
 
-// [BV] every check, before Review and Pay. [CG] now built from the per-step checks above. The "required" message wins
-// whenever any step has a blank, like before, so Review can say which kind of problem it is
+// [BV] every check, before Review and Pay. [CG] now built from the per-step checks. any blank still gives the "required" message first
 export function renewalError(personal: object, license: object, insurance: object): string {
   const steps: FormStep[] = [1, 2, 3];
   if (steps.some(step => firstBlank(step, personal, license, insurance))) return "Complete the required personal, license, vehicle and insurance fields. Use Back or Edit to fill the blanks.";

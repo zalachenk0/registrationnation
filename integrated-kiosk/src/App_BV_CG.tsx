@@ -1,9 +1,9 @@
 // ============================================================================
 // File:         App_BV_CG.tsx
 // Written by:   BV (the form, steps and screens); CG (payment and Monday.com
-//               calls, the Nov 19 fixes from the sponsor meeting notes and the
-//               pieces brought back from the earlier compiled form, tagged
-//               [CG]); SL (scan prompts)
+//               calls, the Nov 19 fixes from the sponsor meeting, and the
+//               front photo, security photo and sign-out pieces the Nov 17
+//               rebuild dropped, tagged [CG]); SL (scan prompts)
 // What it does: The whole touchscreen form: steps, scan prompts, review,
 //               payment, printing and the final screen.
 // Team-written: Logic written by BV (the form, steps and screens); CG (lines
@@ -76,7 +76,7 @@ const US_STATES = [
   "Wisconsin","Wyoming",
 ];
 
-// [CG] step 1 is where the license is scanned, so its label says so (the sponsor found the license scan hard to spot)
+// [CG] step 1 is where the license gets scanned, so the label says that now (sponsor couldn't find the scan)
 const STEPS = [
   { number: 1, label: "Scan License" },
   { number: 2, label: "License Details" },
@@ -92,7 +92,7 @@ function ProgressBar({ current }: { current: Step }) {
         <div
           className="absolute top-4 left-0 h-0.5 transition-all duration-500"
           style={{
-            width: `${((current - 1) / (STEPS.length - 1)) * 100}%`,  // [CG] was / 3, which ran past the end on step 5
+            width: `${((current - 1) / (STEPS.length - 1)) * 100}%`,  // [CG] was / 3, overshot on step 5
             backgroundColor: "var(--primary)",
           }}
         />
@@ -132,15 +132,14 @@ function ProgressBar({ current }: { current: Step }) {
   );
 }
 
-// [CG] how sure the scanner was about each field it filled in (0-1), keyed by the form field's name. The meeting asked for a
-// confidence percentage on autofilled fields, with the shaky ones highlighted. Typing in a field clears its mark, because
-// then it's the customer's own value. The license barcode is read exactly, so its fields show 100%
-export const CONFIDENT = 0.8;  // below this the field is highlighted and the customer is asked to check it
+// [CG] scan confidence per field (0-1), keyed by field name. sponsor wanted a % on autofilled fields with the low ones
+// highlighted. typing in a field clears its badge since it's the customer's value now. barcode fields are always 100%
+export const CONFIDENT = 0.8;  // [CG] under 80% gets highlighted
 const ScanConfidence = createContext<{
   scores: Record<string, number>; clear: (name: string) => void; mark: (scores: Record<string, number>) => void; missing: string;
 }>({ scores: {}, clear: () => undefined, mark: () => undefined, missing: "" });
 
-// the fields a scan actually filled in: blank before, and the scan had a value for them (fillBlank never overwrites)
+// [CG] which fields the scan actually filled (they were blank and the scan had a value, same rule as fillBlank)
 function filledByScan<T extends object>(current: T, incoming: Partial<Record<keyof T, string | undefined>>): (keyof T)[] {
   return (Object.keys(incoming) as (keyof T)[]).filter(key => !String(current[key] ?? "").trim() && incoming[key]?.trim());
 }
@@ -156,7 +155,7 @@ function Field({
   required?: boolean;
   children: React.ReactNode;
   hint?: string;
-  name?: string;  // [CG] the form field this is, for its scan confidence and the "fill this in" highlight
+  name?: string;  // [CG] field name, for the confidence badge and the red "required" outline
 }) {
   const { scores, clear, missing } = useContext(ScanConfidence);
   const score = name !== undefined ? scores[name] : undefined;
@@ -224,7 +223,7 @@ function InputEl({ choices, ...props }: React.InputHTMLAttributes<HTMLInputEleme
       value={date ? displayDate(String(props.value ?? "")) : props.value}
       placeholder={date ? "MM/DD/YYYY" : props.placeholder}
       inputMode={date ? "numeric" : tel ? "tel" : props.inputMode}
-      data-keypad={date || tel || props.name === "zip" || props.inputMode === "numeric" ? "numeric" : undefined}  // [CG] opens the touch keyboard's number pad
+      data-keypad={date || tel || props.name === "zip" || props.inputMode === "numeric" ? "numeric" : undefined}  // [CG] tells the touch keyboard to show the number pad
       maxLength={props.maxLength ?? (date ? 10 : tel ? 12 : undefined)}
       list={choices ? listId : props.list}
       onChange={handleChange}
@@ -280,7 +279,7 @@ function Step1({
   const [scanned, setScanned] = useState(licenseScanned);
   const [expanded, setExpanded] = useState(licenseScanned || Boolean(data.firstName || data.address));
   const { mark, missing } = useContext(ScanConfidence);
-  const showAll = expanded || Boolean(missing && missing in data);  // [CG] a blank Continue stopped on must be visible
+  const showAll = expanded || Boolean(missing && missing in data);  // [CG] open the fields if Continue stopped on one of them
   const set = (k: keyof PersonalInfo) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     onChange({ ...data, [k]: e.target.value });
 
@@ -293,7 +292,7 @@ function Step1({
       dateOfBirth: normalizeDate(f.date_of_birth ?? ""), address: f.street_address,
       city: f.city, state: stateName(f.state), zip: f.zip_code,
     };
-    mark(Object.fromEntries(filledByScan(data, incoming).map(key => [key, 1])));  // [CG] barcode: read exactly
+    mark(Object.fromEntries(filledByScan(data, incoming).map(key => [key, 1])));  // [CG] barcode reads are exact
     onChange(current => fillBlank(current, incoming));
     onLicenseScan(result);
   };
@@ -310,7 +309,7 @@ function Step1({
         autoOpen
       />
 
-      {/* Contact — always manual */}
+      {/* Contact — always manual. [CG] headings and hints reworded */}
       <div className="flex flex-col gap-5">
         <div className="flex items-center gap-3">
           <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
@@ -418,8 +417,7 @@ function CameraModal({
     return () => { controller.abort(); clearTimeout(timer); if (currentUrl) URL.revokeObjectURL(currentUrl); };
   }, []);
 
-  // [CG] license: the front is photographed first (for the Monday record), then the back's barcode is scanned. Brought back
-  // from the earlier compiled form (BV's two-step design); the Nov 17 rebuild from src/ only had the barcode step
+  // [CG] license is two shots: front photo first (goes to Monday), then the barcode on the back. BV's original design
   const [frontSaved, setFrontSaved] = useState(false);
   const [savingFront, setSavingFront] = useState(false);
   const [captureError, setCaptureError] = useState("");
@@ -447,7 +445,7 @@ function CameraModal({
   const [insuranceFormat, setInsuranceFormat] = useState<"paper" | "phone">("paper");
   const shape = docType === "license" ? "license" : insuranceFormat;
   const guides = {
-    license: frontSaved ? {
+    license: frontSaved ? {  // [CG] front/back wording for the two-step license scan
       title: "Now Flip Your License Over",
       subtitle: "Front photo saved. Turn your license over so the barcode on the back faces up.",
       position: "Step 2 of 2 · Back side", label: "Keep your whole license visible",
@@ -564,11 +562,11 @@ function ScanPrompt({
   scanned: boolean;
   onScan: (result: ScanResult) => void;
   onManual?: () => void;
-  autoOpen?: boolean;  // [CG] open the camera as soon as the step shows, instead of waiting for Open Scanner
+  autoOpen?: boolean;  // [CG] camera opens on its own when the step loads
 }) {
   const [state, setState] = useState<ScanState>(scanned ? "done" : "idle");
   const [cameraOpen, setCameraOpen] = useState(false);
-  // [CG] opening the license scanner also asks the security Pi for its license_scan photo (from the earlier compiled form)
+  // [CG] opening the license scanner also triggers the security Pi's license_scan photo
   const openCamera = () => {
     setCameraOpen(true);
     if (docType === "license") void requestSecurityPhoto();
@@ -576,7 +574,7 @@ function ScanPrompt({
   const autoOpened = useRef(false);
   useEffect(() => {
     if (autoOpen && !scanned && !autoOpened.current) { autoOpened.current = true; openCamera(); }
-  }, []);  // eslint-disable-line react-hooks/exhaustive-deps -- once, when the step first shows
+  }, []);  // [CG] only on first load of the step
 
   const [error, setError] = useState("");
   const pending = useRef<AbortController | null>(null);
@@ -621,6 +619,7 @@ function ScanPrompt({
         className="rounded-xl overflow-hidden transition-all duration-300"
         style={{ border: `2px ${state === "done" ? "solid" : "dashed"} ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
       >
+        {/* [CG] bigger prompt and button so the scan step is easy to spot */}
         {state === "idle" && (
           <div className="flex flex-col items-center gap-4 px-6 py-10 text-center">
             <div className="w-20 h-20 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
@@ -710,6 +709,7 @@ function Step2({
         style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}
       >
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Driver's License</p>
+        {/* [CG] */}
         <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>These came from your license's barcode. Fix anything that doesn't match your card.</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           <Field label="License Number" required name="licenseNumber">
@@ -771,17 +771,18 @@ function Step3({
       vehicleYear: f.vehicle_year, vehicleMake: f.vehicle_make, vehicleModel: f.vehicle_model,
       vin: f.vehicle_vin?.length === 17 ? f.vehicle_vin : undefined,
     };
-    // [CG] the reader's own confidence for each field it filled in, under the form's field names
+    // [CG] map the reader's field names to ours so the confidence lines up
     const reader: Record<string, string> = { provider: "insurance_company", policyNumber: "policy_number", endDate: "insurance_expiration",
       vehicleYear: "vehicle_year", vehicleMake: "vehicle_make", vehicleModel: "vehicle_model", vin: "vehicle_vin" };
     const filled = [...filledByScan(data, insuranceIn), ...filledByScan(vehicleData, vehicleIn)] as string[];
-    mark(Object.fromEntries(filled.map(key => [key, result.confidence?.[reader[key]] ?? 0.5])));  // no score at all = unsure
+    mark(Object.fromEntries(filled.map(key => [key, result.confidence?.[reader[key]] ?? 0.5])));  // [CG] no score = treat as unsure
     onChange(current => fillBlank(current, insuranceIn));
     onVehicleChange(current => fillBlank(current, vehicleIn));
   };
 
   return (
     <div className="flex flex-col gap-6">
+      {/* [CG] camera opens on its own; wording updated */}
       <ScanPrompt
         title="Scan Proof of Insurance"
         subtitle="Put your insurance card, or your phone showing your insurance, in the scanner box."
@@ -1142,13 +1143,13 @@ export default function App() {
   const [initials, setInitials] = useState("");
   const [printResult, setPrintResult] = useState<PrintStatus | null>(null);
   const [printNotice, setPrintNotice] = useState("");
-  const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] the printer never answered; the screen still moves on
+  const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] printer never finished, move on anyway
   const [checkingSession, setCheckingSession] = useState(true);
-  const [staff, setStaff] = useState<StaffUser | null>(null);  // [CG] who is signed in, for the sign-out bar
+  const [staff, setStaff] = useState<StaffUser | null>(null);  // [CG] for the sign-out bar
   const [signingOut, setSigningOut] = useState(false);
   const [staffMessage, setStaffMessage] = useState("");
-  const [formError, setFormError] = useState("");  // [CG] shown on the page instead of a pop-up, which blocks the touchscreen
-  const [missing, setMissing] = useState("");  // [CG] the blank field Continue stopped on
+  const [formError, setFormError] = useState("");  // [CG] on-page message, pop-ups lock up the touchscreen
+  const [missing, setMissing] = useState("");  // [CG] the blank field Continue stopped at
   const [scores, setScores] = useState<Record<string, number>>({});  // [CG] scan confidence per field
   const confidence = {
     scores, missing,
@@ -1173,8 +1174,7 @@ export default function App() {
     };
   }, []);
 
-  // [CG] staff sign-out, brought back from the earlier compiled form. Not allowed mid-renewal, so a paid customer's
-  // receipt can't be lost
+  // [CG] staff sign-out. blocked mid-renewal so a paid customer's receipt doesn't get lost
   const handleSignOut = async () => {
     if (sessionStorage.getItem("kiosk-payment-reference")) {
       setStaffMessage("Complete the current payment and receipt, then start a new renewal before signing out.");
@@ -1199,7 +1199,7 @@ export default function App() {
   // no typed-card backup; a reader problem shows on the card reader step, with Retry connecting
 
   // monday.com crm record, shown on the success screen
-  // [CG] still tracked (a failed save is logged by the server), just no longer shown to the customer
+  // [CG] still tracked, just not shown anymore (the server logs failed saves)
   const [, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [, setCrmMessage] = useState("");
   const crmSavedRef = useRef(false);  // so a print retry can never make a second crm record
@@ -1240,8 +1240,8 @@ export default function App() {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const started = Date.now();
-    // [CG] if the printer never reports finished, stop waiting after 2 minutes: tell the customer to get staff and let the
-    // screen reset for the next customer, so one stuck print job can't freeze the kiosk
+    // [CG] give up after 2 min with no "finished" from the printer: send the customer to staff and let the screen reset,
+    // so one stuck print job can't freeze the kiosk
     const giveUp = setTimeout(() => setPrintTimedOut(true), 120000);
     const poll = async () => {
       try {
@@ -1281,7 +1281,7 @@ export default function App() {
         city: personal.city,
         state: personal.state,
         zip: personal.zip,
-        county: personal.county,  // [CG] goes to the column set by MONDAY_COUNTY_COLUMN
+        county: personal.county,  // [CG] column comes from MONDAY_COUNTY_COLUMN
         fullAddress: [personal.address, cityStateZip].filter(Boolean).join(", "),
         licenseNumber: license.licenseNumber,
         licensePlate: plate,
@@ -1321,7 +1321,7 @@ export default function App() {
   };
 
   // [BV] pay-then-print step; the payment and Monday.com calls inside it are [CG]
-  const [paymentError, setPaymentError] = useState("");  // [CG] on the page, not a pop-up
+  const [paymentError, setPaymentError] = useState("");  // [CG] on-page, not a pop-up
   const handlePrint = async () => {
     if (printPending.current) return;
     const error = renewalError(personal, license, insurance);
@@ -1329,7 +1329,7 @@ export default function App() {
     printPending.current = true;
     setPrinting(true);
     setPaymentError("");
-    if (!printReference.current) printReference.current = transactionId();  // [CG] shorter, so it fits the receipt
+    if (!printReference.current) printReference.current = transactionId();  // [CG] short enough to fit the receipt
     sessionStorage.setItem("kiosk-payment-reference", printReference.current);
     let confirmed = paid;
     try {
@@ -1338,7 +1338,7 @@ export default function App() {
         vehicle_make: license.vehicleMake, vehicle_model: license.vehicleModel,
         vin: license.vin, confirmation_number: printReference.current,
         receipt_email: personal.email.trim(),  // Stripe emails its receipt to this when the payment is captured
-        security_event_id: crypto.randomUUID() };  // [CG] new for each Pay attempt, so each one gets its own security photo (lost in the Nov 17 rebuild)
+        security_event_id: crypto.randomUUID() };  // [CG] new one per Pay attempt so each attempt gets its own security photo
       if (!paid && !cardEntry.current) throw new Error("Wait for the card reader to connect.");
       confirmed = paid || await cardEntry.current!.pay(payload, setPaymentStatus);
       if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
@@ -1364,7 +1364,7 @@ export default function App() {
     }
   };
 
-  const stepTitles: Record<Step, string> = {
+  const stepTitles: Record<Step, string> = {  // [CG] steps 1 and 2 renamed
     1: "Scan Your Driver's License",
     2: "Driver's License Details",
     3: "Insurance & Vehicle Details",
@@ -1372,7 +1372,7 @@ export default function App() {
     5: "Payment",
   };
 
-  // [CG] clearer prompts: what to do on this screen, in the order they do it
+  // [CG] reworded so each screen says what to do, in order
   const stepSubtitles: Record<Step, string> = {
     1: "Scan your driver’s license, then type your email and phone number.",
     2: "Check that these match your driver’s license. Tap a field to fix it.",
@@ -1381,9 +1381,7 @@ export default function App() {
     5: "Pay $114.25 on the card reader. Your sticker and receipt print right after.",
   };
 
-  // [CG] the sponsor asked for payment to start on its own on the payment step: once the reader is connected, the
-  // payment goes to the reader without a Pay press. Only the first time per visit to the step, so a decline or a Cancel
-  // waits for the customer to press Try Again instead of looping on the reader
+  // [CG] payment kicks off on its own once the reader connects. only once per visit, so a decline waits for Try Again
   const autoPaid = useRef(false);
   useEffect(() => {
     if (step !== 5) { autoPaid.current = false; return; }
@@ -1391,7 +1389,7 @@ export default function App() {
       autoPaid.current = true;
       void handlePrint();
     }
-  });  // eslint-disable-line react-hooks/exhaustive-deps -- runs after each render, acts once per visit
+  });  // [CG] checks every render, fires once
 
   if (checkingSession) return <p role="status">Opening kiosk…</p>;
   if (!authed) return <AdminLogin onLogin={() => setAuthed(true)} />;
@@ -1514,8 +1512,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* [CG] the Monday.com (CRM) status used to show here. The sponsor asked for it to go: customers don't need it.
-                A record that couldn't be saved is still written to runtime/kiosk-problems.log ("MONDAY NOT SAVED") for staff */}
+            {/* [CG] Monday (CRM) status removed per sponsor. failed saves still go to runtime/kiosk-problems.log */}
 
             {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
           </div>
@@ -1524,8 +1521,7 @@ export default function App() {
     );
   }
 
-  // [CG] Continue checks this step's fields first (the sponsor saw customers skip ahead with blanks). It stops at the first
-  // blank one, outlines it in red and scrolls it into view
+  // [CG] Continue checks this step first. stops at the first blank, outlines it red and scrolls to it
   const goNext = () => {
     const current = step as FormStep;
     const error = stepError(current, personal, license, insurance);
@@ -1542,7 +1538,7 @@ export default function App() {
   return (
     <ScanConfidence.Provider value={confidence}>
     <div className="kiosk-ui min-h-screen" style={{ backgroundColor: "var(--background)" }}>
-      {/* [CG] staff bar with sign-out, from the earlier compiled form */}
+      {/* [CG] staff bar with sign-out */}
       {staff && (
         <div className="px-6 py-2 flex flex-wrap items-center justify-end gap-4 text-sm" style={{ background: "var(--primary)", color: "white" }}>
           <span>{staff.username}{staff.mode === "master" ? " · Master administrator" : " · Staff"}</span>
@@ -1658,6 +1654,7 @@ export default function App() {
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2d6636"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#3a7d44"; }}
             >
+              {/* [CG] "Try Again" after a decline */}
               {printing ? (paid ? "Sending to printer…" : "Waiting for the card reader…") : paid ? "Retry Printing" : paymentError ? "Try Again" : "Pay $114.25"}
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />

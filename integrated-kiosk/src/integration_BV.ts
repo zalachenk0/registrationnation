@@ -1,7 +1,7 @@
 // ============================================================================
 // File:         integration_BV.ts
-// Written by:   BV (Blas Vargas); CG (the photo, security camera and sign-out
-//               calls brought back from the earlier compiled form, tagged [CG])
+// Written by:   BV (Blas Vargas); CG (the front photo, security photo and
+//               sign-out calls the Nov 17 rebuild dropped, tagged [CG])
 // What it does: Calls from the browser to the local scan API.
 // Team-written: Logic written by BV (Blas Vargas); CG (lines tagged [CG]).
 //               Outside code is used only through the third-party sources
@@ -10,8 +10,7 @@
 // ============================================================================
 /** Local API adapters. No payment details or document images are persisted by the UI. */
 
-// [BV] every call to our own server goes through here: marks it as coming from the kiosk screen, and a 401 (signed out)
-// sends the screen back to staff sign-in
+// [BV] every call to our server goes through here. marks it as from the kiosk, and a 401 kicks back to staff sign-in
 export async function kioskFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
   headers.set("X-Kiosk-Request", "1");
@@ -28,7 +27,7 @@ export interface ScanResult {
   missing: string[];
   notes: string[];
   recommendation: string;
-  confidence?: Record<string, number>;  // [CG] 0-1 per field, from the insurance reader; the license barcode has none (it's exact)
+  confidence?: Record<string, number>;  // [CG] 0-1 per field from the insurance reader. barcode scans don't send one (they're exact)
 }
 
 export function fillBlank<T extends object>(current: T, incoming: Partial<Record<keyof T, string | undefined>>): T {
@@ -49,17 +48,15 @@ export async function requestScan(kind: "license" | "insurance", signal: AbortSi
   return result;
 }
 
-// [CG] the front of the license, saved before the barcode scan so it can go on the Monday record. Brought back from the
-// earlier compiled form (BV's design); the Nov 17 rebuild from src/ had lost it
+// [CG] saves the front of the license before the barcode scan, for the Monday record
 export async function saveLicenseFront(signal: AbortSignal): Promise<void> {
   const response = await kioskFetch("/api/camera/license-front", { method: "POST", signal });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || !result.saved) throw new Error(result.error || "The front photo could not be saved. Please try again.");
 }
 
-// [CG] asks the security Pi for its "license_scan" photo when the license scanner opens. Also brought back from the earlier
-// compiled form. A failure only means one missing security photo, so it never stops the customer
-let securityPhotoPending = false;  // one request at a time, like the earlier form
+// [CG] asks the security Pi for its license_scan photo. if it fails we just miss one photo, the customer never sees it
+let securityPhotoPending = false;  // [CG] one request at a time
 export async function requestSecurityPhoto(): Promise<void> {
   if (securityPhotoPending) return;
   securityPhotoPending = true;
@@ -76,7 +73,7 @@ export async function requestSecurityPhoto(): Promise<void> {
   }
 }
 
-// [CG] staff session: who is signed in, and signing out. Brought back from the earlier compiled form
+// [CG] who's signed in, and signing out
 export interface StaffUser { username: string; mode?: string }
 
 export async function staffSession(signal?: AbortSignal): Promise<StaffUser | null> {

@@ -12,4 +12,5 @@ runtime/
 !.env.example
 *.key
 *.p12
-!dist/*.pem
+!dist/
+*.pem
