@@ -173,6 +173,88 @@ test('touching a button does not close the keyboard until the tap is finished', 
   assert.equal(page.keyboard(), null, 'closed once the tap is done');
 });
 
+// [CG] Nov 19 bugs from the real touchscreen: Shift closed the keyboard, and the phone hyphen threw the cursor off
+
+test('Shift and #+= change the keys but keep the keyboard open', async t => {
+  const page = await keyboardPage(t, '<input id="name" type="text">');
+  const name = document.getElementById('name');
+  await page.tap(name);
+  await page.tap(page.key('Shift'));                     // label turns into SHIFT and the letters into capitals
+  assert.ok(page.keyboard(), 'still open after Shift');
+  await page.tap(page.key('A'));
+  assert.equal(name.value, 'A');
+  await page.tap(page.key('#+='));
+  assert.ok(page.keyboard(), 'still open after #+=');
+  await page.tap(page.key('ABC'));
+  assert.ok(page.keyboard(), 'still open after ABC');
+});
+
+test('Shift stays the same button when its label changes (a swapped-out button made the tap look like it missed)', async t => {
+  const page = await keyboardPage(t, '<input id="name" type="text">');
+  await page.tap(document.getElementById('name'));
+  const shift = page.key('Shift'), symbols = page.key('#+=');
+  await act(async () => shift.click());
+  assert.equal(page.key('SHIFT'), shift, 'same element, just relabeled');
+  await act(async () => symbols.click());
+  assert.equal(page.key('ABC'), symbols);
+});
+
+test('a tap on a key that got redrawn mid-tap still counts as a keyboard tap', async t => {
+  // in Chromium the redraw can land before the tap reaches the page, so the tapped key is already gone from the page
+  const page = await keyboardPage(t, '<input id="name" type="text">');
+  await page.tap(document.getElementById('name'));
+  const key = page.key('q');
+  key.addEventListener('click', () => key.remove());
+  await act(async () => key.click());
+  assert.ok(page.keyboard(), 'still open');
+});
+
+// the same phone formatting InputEl does in App_BV_CG.tsx: digits, then dashes after 3 and 6
+function formatsLikeThePhoneField(field) {
+  field.addEventListener('input', () => {
+    const digits = field.value.replace(/\D/g, '').slice(0, 10);
+    field.value = [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6)].filter(Boolean).join('-');
+  });
+}
+
+test('typing a phone number on the number pad comes out in order, dashes and all', async t => {
+  const page = await keyboardPage(t, '<input id="phone" type="tel" data-keypad="numeric" maxlength="12">');
+  const phone = document.getElementById('phone');
+  formatsLikeThePhoneField(phone);
+  await page.tap(phone);
+  for (const digit of '8305550123') await act(async () => page.key(digit).click());
+  assert.equal(phone.value, '830-555-0123');
+  assert.equal(phone.selectionStart, 12, 'cursor stays at the end');
+});
+
+test('backspace over a dash removes the digit before it instead of getting stuck', async t => {
+  const page = await keyboardPage(t, '<input id="phone" type="tel" data-keypad="numeric" maxlength="12">');
+  const phone = document.getElementById('phone');
+  formatsLikeThePhoneField(phone);
+  await page.tap(phone);
+  for (const digit of '8305') await act(async () => page.key(digit).click());
+  assert.equal(phone.value, '830-5');
+  await act(async () => page.key('⌫').click());
+  assert.equal(phone.value, '830');
+  phone.setSelectionRange(4, 4);
+  phone.value = '830-';                                    // cursor sitting right after a dash
+  phone.setSelectionRange(4, 4);
+  await act(async () => page.key('⌫').click());
+  assert.equal(phone.value, '83');
+});
+
+test('fixing a digit in the middle keeps the cursor next to it', async t => {
+  const page = await keyboardPage(t, '<input id="phone" type="tel" data-keypad="numeric" maxlength="12">');
+  const phone = document.getElementById('phone');
+  formatsLikeThePhoneField(phone);
+  await page.tap(phone);
+  for (const digit of '830555012') await act(async () => page.key(digit).click());
+  phone.setSelectionRange(2, 2);                           // between 8 3 | 0
+  await act(async () => page.key('9').click());
+  assert.equal(phone.value, '839-055-5012');
+  assert.equal(phone.selectionStart, 3, 'right after the 9, not shoved back by the dash');
+});
+
 // ---- the built form in dist/ ----
 
 const index = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');

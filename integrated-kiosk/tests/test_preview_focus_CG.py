@@ -213,3 +213,61 @@ def test_settings_come_from_the_env_file(monkeypatch):
         monkeypatch.setenv('KIOSK_CAMERA_PREVIEW_FOCUS', off)
         assert Settings().preview_focus is False
     assert Settings().scene_change == 9 and Settings().scene_still == 1.5
+
+
+# ---- [CG] flipping the license after its front photo (Nov 19) ----
+# the back is the same card in the same spot, so the picture can change too little to count as a new document.
+# before this fix the preview never refocused after the flip, and the barcode scan skipped its sweep too
+
+def front_photo_taken(box, cam):
+    box.place(650)
+    cam.get(preview=True, timeout=5)
+    assert wait_until(lambda: settled(cam) and cam.focus == 650)
+    cam.get(timeout=5)                       # the front photo
+    cam.expect_flip()                        # what the license-front route does next
+    box.moves.clear()
+
+
+def test_after_the_front_photo_flipping_the_card_refocuses_the_preview(box):
+    cam = camera()
+    front_photo_taken(box, cam)
+    box.moving = True                        # the flip
+    watch(cam, 0.15)
+    box.moving = False
+    assert wait_until(lambda: settled(cam) and box.moves != [])   # it swept again once the card was still
+    cam.close()
+
+
+def test_until_the_card_moves_the_lens_stays_put_but_a_scan_still_sweeps(box):
+    cam = camera()
+    front_photo_taken(box, cam)
+    watch(cam, 0.6)                          # card not flipped yet
+    assert box.moves == [] and cam.focus_fresh is False
+    cam.get(timeout=5)                       # Scan pressed anyway: sweeps instead of trusting the old focus
+    cam.close()
+    assert box.moves != []
+
+
+def test_a_sweep_finishing_right_after_the_front_photo_does_not_mark_focus_fresh(box):
+    cam = camera()
+    box.place(650)
+    cam.get(preview=True, timeout=5)
+    assert wait_until(lambda: settled(cam))
+    cam.expect_flip()
+    cam._rebase = True                       # the front photo's sweep result lands just after expect_flip
+    watch(cam, 0.3)
+    fresh = cam.focus_fresh                  # checked before close(), which always clears it
+    rebased = cam._rebase
+    cam.close()
+    assert rebased is False and fresh is False
+
+
+def test_the_front_photo_route_sets_up_the_refocus(monkeypatch, tmp_path):
+    import scanner_api_BV_CG as api
+    monkeypatch.setenv('KIOSK_LICENSE_PHOTO_DIR', str(tmp_path))
+    monkeypatch.setattr(api.camera, 'get', lambda preview=False, timeout=10: np.full((60, 90, 3), 140, np.uint8))
+    monkeypatch.setattr(api.photos, 'license_taken', lambda path: None)
+    api.camera.focus_fresh, api.camera._await_move = True, False
+    assert api.app.test_client().post('/api/camera/license-front').json == {'saved': True}
+    assert api.camera.focus_fresh is False and api.camera._await_move is True
+    api.camera._await_move = False

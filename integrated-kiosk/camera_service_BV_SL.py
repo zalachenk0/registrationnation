@@ -146,6 +146,7 @@ class Camera:
         self._scene_last = None  # thumbnail of the previous preview frame
         self._still_since = 0.0  # when the picture last stopped moving
         self._rebase = False  # the next preview frame becomes _scene_focused (a sweep just finished)
+        self._await_move = False  # [CG] waiting for the license to be flipped (see expect_flip)
 
     def status(self):
         with self.condition:
@@ -274,6 +275,7 @@ class Camera:
             # [CG] a closed camera remembers nothing about what was in view: the next open focuses afresh
             self._scene_focused = self._scene_last = None
             self._rebase = False
+            self._await_move = False  # [CG]
             if close:
                 try:
                     close()
@@ -309,12 +311,18 @@ class Camera:
         s = self.settings
         thumb = thumbnail(preview)
         now = time.monotonic()
+        still = max(1.5, s.scene_change / 3)  # smaller than a new document, bigger than noise
         if self._rebase:  # a sweep just finished: this is the picture the lens is sharp for
             self._scene_focused, self._scene_last, self._still_since, self._rebase = thumb, thumb, now, False
             with self.condition:
-                self.focus_fresh = True
+                self.focus_fresh = not self._await_move  # [CG] a flip is coming, so this focus won't last
             return
-        still = max(1.5, s.scene_change / 3)  # smaller than a new document, bigger than noise
+        if self._await_move:  # [CG] after the front photo: wait for the card to move (the flip), then refocus once it's still
+            if self._scene_last is not None and difference(thumb, self._scene_last) <= still:
+                self._scene_last = thumb
+                return
+            self._await_move = False
+            self._scene_focused = None  # whatever's in view once it settles counts as new, so it gets a sweep
         if self._scene_last is None or difference(thumb, self._scene_last) > still:
             self._still_since = now  # moving (or just opened): start the stillness clock again
         self._scene_last = thumb
@@ -326,6 +334,15 @@ class Camera:
             self.focus_fresh = False  # the lens may not suit what's in view now, so a capture sweeps again
             if now - self._still_since >= s.scene_still and not self.focus_requested:
                 self.focus_requested = True
+
+    def expect_flip(self):
+        """[CG] Called after the license front photo. The back is the same card in the same spot, so the picture can
+        change too little to count as a new document, and the preview never refocused after the flip (and the barcode
+        scan skipped its own sweep since focus still looked fresh). Now: refocus once the card moves and settles again,
+        and until then a Scan always sweeps."""
+        with self.condition:
+            self.focus_fresh = False
+            self._await_move = True
 
     def _measure(self, read, position):
         """Moves the lens, waits for it to settle (keeping the preview live), returns the sharpness."""

@@ -20,17 +20,41 @@ function typeable(target: EventTarget | null): target is HTMLInputElement | HTML
 }
 
 // types a key like a real keyboard would, so React's onChange and formatting still fire
-function press(field: HTMLInputElement | HTMLTextAreaElement, key: string) {
+const REAL = /[A-Za-z0-9]/;  // [CG] what's actually typed, as opposed to the - and / the form adds on its own
+
+// [CG] where the cursor goes in the new value: right after the same number of real characters as before. the phone,
+// date and ZIP fields add - or / as you type, so going by plain position put the cursor one spot too far back
+export function caretAfter(value: string, realBefore: number): number {
+  if (realBefore <= 0) return 0;
+  let seen = 0;
+  for (let index = 0; index < value.length; index++) {
+    if (REAL.test(value[index]) && ++seen === realBefore) return index + 1;
+  }
+  return value.length;
+}
+
+export function press(field: HTMLInputElement | HTMLTextAreaElement, key: string) {
   const start = field.selectionStart ?? field.value.length;
   const end = field.selectionEnd ?? start;
-  const from = key === "Backspace" && start === end ? Math.max(0, start - 1) : start;
+  let from = key === "Backspace" && start === end ? Math.max(0, start - 1) : start;
+  // [CG] backspace right after an auto-added - or / would just get put back, so delete the digit before it too
+  if (key === "Backspace" && start === end && field.dataset.keypad === "numeric") {
+    while (from > 0 && !REAL.test(field.value[from])) from--;
+  }
   const text = key === "Backspace" ? "" : key;
   const next = field.value.slice(0, from) + text + field.value.slice(end);
-  if (field.maxLength >= 0 && next.length > field.maxLength) return;
+  if (field.maxLength >= 0 && next.length > field.maxLength && field.dataset.keypad !== "numeric") return;  // [CG] the form trims number fields itself
+  const realBefore = Array.from(next.slice(0, from + text.length)).filter(c => REAL.test(c)).length;  // [CG]
   const prototype = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(field, next);
   field.dispatchEvent(new Event("input", { bubbles: true }));
-  try { field.setSelectionRange(from + text.length, from + text.length); } catch { /* email fields have no cursor position */ }
+  // [CG] place the cursor after the form has reformatted the value, and again after React's re-render just in case
+  const place = () => {
+    const at = field.dataset.keypad === "numeric" ? caretAfter(field.value, realBefore) : from + text.length;
+    try { field.setSelectionRange(at, at); } catch { /* email fields have no cursor position */ }
+  };
+  place();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(place);
 }
 
 // [CG] InputEl marks number fields with data-keypad="numeric". the old name/placeholder guess is the fallback
@@ -63,6 +87,7 @@ export function TouchKeyboard() {
     // [CG] close the keyboard after the tap finishes, not on touch-down. closing it early shifted the page under the
     // finger and taps on Continue would miss
     const tapped = (event: MouseEvent) => {
+      if (event.target instanceof Node && !event.target.isConnected) return;  // [CG] key was redrawn mid-tap (Shift, #+=), still a keyboard tap
       if (event.target instanceof Node && panel.current?.contains(event.target)) return;
       if (!typeable(event.target)) setField(null);
     };
@@ -101,8 +126,10 @@ export function TouchKeyboard() {
     press(field, shift && !symbols && key !== "Backspace" ? key.toUpperCase() : key);
   };
   const close = () => { field.blur(); setField(null); };
-  const key = (label: string, onPress: () => void, extra = "") =>
-    <button key={label} type="button" className={`touch-key ${extra}`} onClick={onPress}>{label}</button>;
+  // [CG] id stays the same when the label changes (Shift -> SHIFT, a -> A), so the button isn't swapped out mid-tap.
+  // that swap is what made Shift close the keyboard
+  const key = (label: string, onPress: () => void, extra = "", id = label) =>
+    <button key={id} type="button" className={`touch-key ${extra}`} onClick={onPress}>{label}</button>;
 
   return (
     <div ref={panel} className={`touch-keyboard ${numeric ? "touch-keyboard-numeric" : ""}`} role="region"
@@ -113,13 +140,13 @@ export function TouchKeyboard() {
       </div>
       {rows.map((row, index) => (
         <div key={index} className="touch-keyboard-row touch-keyboard-characters">
-          {Array.from(row).map(character => key(shift && !symbols ? character.toUpperCase() : character, () => type(character)))}
+          {Array.from(row).map(character => key(shift && !symbols ? character.toUpperCase() : character, () => type(character), "", character))}
           {index === 0 && key("⌫", () => type("Backspace"), "touch-key-wide")}
         </div>
       ))}
       <div className="touch-keyboard-row">
-        {!numeric && key(shift ? "SHIFT" : "Shift", () => setShift(!shift))}
-        {!numeric && key(symbols ? "ABC" : "#+=", () => setSymbols(!symbols))}
+        {!numeric && key(shift ? "SHIFT" : "Shift", () => setShift(!shift), "", "shift")}
+        {!numeric && key(symbols ? "ABC" : "#+=", () => setSymbols(!symbols), "", "symbols")}
         {!numeric && key("@", () => type("@"))}
         {!numeric && key("Space", () => type(" "), "touch-key-space")}
         {!numeric && key(".", () => type("."))}

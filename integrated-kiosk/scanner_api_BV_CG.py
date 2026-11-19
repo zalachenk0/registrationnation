@@ -136,6 +136,7 @@ def license_front_photo():
         except OSError:
             target.unlink(missing_ok=True)
             raise
+        camera.expect_flip()  # [CG] refocus once the customer flips the card for the barcode
         try:
             photos.license_taken(target)  # [CG] remembered so it can go on this customer's Monday record
         except Exception:
