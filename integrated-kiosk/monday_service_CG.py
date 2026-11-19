@@ -87,6 +87,18 @@ COLUMN_MAP: dict[str, dict[str, str]] = {
     "renewalStatus":       {"column": "status0__1",     "type": "status", "value": "Completed at kiosk"},      # Renewal Status (this label has to be added to the board first, spelled exactly like this)
 }
 
+# [CG] the registration county goes in a column set in .env, because the board's county column wasn't mapped before.
+# Unset = county is skipped quietly. MONDAY_COUNTY_COLUMN_TYPE is only needed when that column isn't a plain text column
+# (a dropdown or status column then has to have a label for every county the kiosk can send)
+def _column_map() -> dict[str, dict[str, str]]:
+    columns = dict(COLUMN_MAP)
+    county = os.getenv("MONDAY_COUNTY_COLUMN", "").strip()
+    if county:
+        kind = os.getenv("MONDAY_COUNTY_COLUMN_TYPE", "").strip().lower()
+        columns["county"] = {"column": county, "type": kind if kind in {"dropdown", "status"} else "text"}
+    return columns
+
+
 # column types we know how to fill (used by the 'columns' helper)
 SUPPORTED_TYPES = {"text", "long_text", "numbers", "status", "dropdown", "date", "datetime", "email", "phone", "link", "checkbox"}
 
@@ -307,7 +319,7 @@ def create_monday_record(item_name: str | None, fields: dict[str, Any]) -> dict[
     fields = _add_derived_fields(fields)
     column_values: dict[str, Any] = {}
     warnings: list[str] = []
-    for field_name, spec in COLUMN_MAP.items():
+    for field_name, spec in _column_map().items():  # [CG] COLUMN_MAP plus the county column from .env
         raw = spec["value"] if "value" in spec else fields.get(field_name)  # "value" = same every time
         if raw is None or str(raw).strip() == "":
             continue  # nothing to send for this one
@@ -361,6 +373,7 @@ SAMPLE_FIELDS: dict[str, str] = {
     "city": "Corpus Christi",
     "state": "TX",
     "zip": "78412",
+    "county": "Nueces",
     "fullAddress": "123 Test Street, Corpus Christi, TX 78412",
     "licenseNumber": "00000000",
     "licensePlate": "TEST123",

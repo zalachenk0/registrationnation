@@ -1,12 +1,13 @@
 # ============================================================================
 # File:         extraction_service_BV_SL.py
 # Written by:   BV (connects the scanners to the web server); SL (the scanners
-#               it calls)
+#               it calls); CG (VIN reading and scan confidence, tagged [CG])
 # What it does: Runs the license, insurance and renewal notice scans for the web
 #               server and returns the form fields.
 # Team-written: Logic written by BV (connects the scanners to the web server);
-#               SL (the scanners it calls). Outside code is used only through
-#               the third-party sources listed below.
+#               SL (the scanners it calls); CG (VIN reading and scan confidence,
+#               tagged [CG]). Outside code is used only through the third-party
+#               sources listed below.
 # Third-party:  OpenCV; pytesseract (Tesseract OCR); The kiosk_scanners_SL package.
 # ============================================================================
 """Web adapter for the partner's PDF417 decoder, insurance OCR/parser and renewal notice OCR."""
@@ -244,9 +245,9 @@ def scan_insurance(image):
     fields['insurance_expiration'] = normalized_date(fields['insurance_expiration'], ('%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d'))
     if not fields['insurance_expiration']:
         notes.append('Policy end date could not be read reliably. Enter the printed expiration date; it is required.')
-    vins = set(re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', best_text.upper()))
-    fields['vehicle_vin'] = next(iter(vins)) if len(vins) == 1 else ''
-    if len(vins) > 1:
+    vin, vin_confidence, other_vehicles = find_vin(best_text)  # [CG] was an exact-match regex, which missed VINs OCR had spaced out or misread
+    fields['vehicle_vin'] = vin
+    if other_vehicles:
         for key in ('vehicle_vin_last6', 'vehicle_year', 'vehicle_make', 'vehicle_model'):
             fields[key] = ''
         notes.append('Multiple vehicles found. Enter the vehicle being renewed manually.')
@@ -259,7 +260,66 @@ def scan_insurance(image):
     logging.getLogger(__name__).info('Insurance extraction: %.2fs, %d OCR passes', elapsed, attempts)
     if not any(fields.values()):
         raise ValueError('No insurance fields were readable. Use a closer, sharp, well-lit image or enter the information manually.')
-    return response(fields, notes)
+    # [CG] how sure the reader is about each field (0-1), so the form can point the customer at the shaky ones
+    confidence = {key: round(float(value), 2) for key, value in (best.get('field_confidence') or {}).items()
+                  if key in fields and fields[key] and isinstance(value, (int, float))}
+    if fields['vehicle_vin']:
+        confidence['vehicle_vin'] = vin_confidence
+    result = response(fields, notes)
+    result['confidence'] = confidence
+    return result
+
+
+# ---- [CG] VIN reading ----
+# Insurance cards print the VIN in many ways, and OCR adds its own mistakes: a space in the middle
+# ("1HGCM 82633A004352"), an O for a 0 or an I for a 1 (letters a VIN never uses), or the VIN glued
+# to its label ("VIN:1HGCM..."). The old exact-match regex skipped all of those, so year, make and
+# model filled in but the VIN stayed blank.
+VIN_WEIGHTS = (8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2)
+VIN_VALUES = {**{str(n): n for n in range(10)},
+              **dict(zip('ABCDEFGH', range(1, 9))), **dict(zip('JKLMN', range(1, 6))), 'P': 7, 'R': 9,
+              **dict(zip('STUVWXYZ', range(2, 10)))}
+
+
+def vin_check_digit_ok(vin):
+    """North American VINs carry a check digit in position 9; a random OCR string passes only 1 time in 11."""
+    if not re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', vin):
+        return False
+    remainder = sum(VIN_VALUES[c] * w for c, w in zip(vin, VIN_WEIGHTS)) % 11
+    return vin[8] == ('X' if remainder == 10 else str(remainder))
+
+
+def fix_vin_letters(text):
+    return text.replace('O', '0').replace('Q', '0').replace('I', '1')  # never valid in a VIN, and OCR's usual swaps
+
+
+def find_vin(text):
+    """Returns (vin, confidence, more_than_one_vehicle). A blank vin means none could be picked safely."""
+    exact, joined = set(), set()
+    for line in text.upper().splitlines():
+        line = re.sub(r'\bVIN\s*(?:#|NO\.?|NUMBER)?\s*:?', ' ', line)  # drop the label, even when glued on
+        tokens = [re.sub(r'[^A-Z0-9]', '', token) for token in line.split()]
+        tokens = [token for token in tokens if token]
+        for token in tokens:  # one word that is a VIN, as before, but with O/I/Q fixed
+            candidate = fix_vin_letters(token)
+            if len(candidate) == 17 and re.fullmatch(r'[A-HJ-NPR-Z0-9]{17}', candidate) and re.search(r'\d', candidate):
+                exact.add(candidate)
+        for size in (2, 3):  # a VIN split by OCR into 2 or 3 pieces; only trusted when the check digit agrees
+            for start in range(len(tokens) - size + 1):
+                pieces = tokens[start:start + size]
+                if any(not re.search(r'\d', piece) for piece in pieces):
+                    continue  # plain words ("POLICY NUMBER") are never part of a VIN
+                candidate = fix_vin_letters(''.join(pieces))
+                if len(candidate) == 17 and vin_check_digit_ok(candidate):
+                    joined.add(candidate)
+    checked = {vin for vin in exact | joined if vin_check_digit_ok(vin)}
+    if len(checked) > 1:
+        return '', 0.0, True  # two real VINs: the card lists more than one vehicle
+    if len(checked) == 1:
+        return next(iter(checked)), 0.95, False
+    if len(exact) == 1:
+        return next(iter(exact)), 0.7, False  # looks like a VIN, but its check digit doesn't agree (or it's not a US VIN)
+    return '', 0.0, len(exact) > 1
 
 
 # Renewal notice (TxDMV VTR-39-A). Optional: its values only fill form fields

@@ -42,7 +42,11 @@ class PaymentError(RuntimeError):
     pass
 
 
+_HTTP = None  # [CG] the one connection to Stripe this server keeps open (see _client)
+
+
 def _client():
+    global _HTTP
     key = os.getenv('STRIPE_SECRET_KEY', '').strip()
     if not key or 'xxxxx' in key or 'REPLACE' in key:
         raise PaymentError('Add your Stripe test secret key to .env, then restart the kiosk.')
@@ -50,7 +54,12 @@ def _client():
         raise PaymentError('This local kiosk supports Stripe test keys only. Live payments require a production deployment.')
     stripe.api_key = key  # [3RD PARTY: Stripe API]
     stripe.max_network_retries = 1
-    stripe.default_http_client = stripe.RequestsClient(timeout=20)
+    # [CG] made once and kept, so each server thread reuses its open connection to Stripe. A new client on every call
+    # (as before) meant a fresh DNS lookup and secure handshake for every Pay press and every once-a-second status check
+    if _HTTP is None:
+        _HTTP = stripe.RequestsClient(timeout=20)
+    if stripe.default_http_client is not _HTTP:
+        stripe.default_http_client = _HTTP
 
 
 # a simple sanity check, not a full email validator. Anything that fails it is just not used for a receipt
@@ -411,6 +420,7 @@ class PaymentService:
             try:
                 reader_id, row = self._ours(payload)
                 # pressing Pay again while the reader is already asking for this card must not send it a second time
+                current = None
                 if row and row['intent_id']:
                     current = self._retrieve(row)
                     if self._method(current) == 'terminal' and current.status in UNPAID:
@@ -418,8 +428,9 @@ class PaymentService:
                         if action and action.get('status') == 'in_progress':
                             return self._reader_answer(current, 'waiting')
                 if intent_only(payload):
-                    # the built screen already made (or reused) the payment with create_intent; only send it
-                    current = self._retrieve(row)
+                    # the built screen already made (or reused) the payment with create_intent; only send it.
+                    # [CG] it was just looked up above, so it isn't asked for again: one less trip to Stripe per Pay
+                    current = current or self._retrieve(row)
                     if self._method(current) != 'terminal':
                         raise PaymentError('This payment was not started for the card reader. Press Pay to start again.')
                     created = self._result(current)

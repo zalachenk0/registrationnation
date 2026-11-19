@@ -1,13 +1,13 @@
-import { kioskFetch } from "./integration_BV";
 // ============================================================================
 // File:         monday_CG.ts
 // Written by:   CG (Cristian Gonzalez)
 // What it does: Browser side call that saves the finished renewal to Monday.com
 //               through our server.
 // Team-written: All logic written by CG (Cristian Gonzalez), except the lines
-//               tagged [3RD PARTY].
+//               tagged [3RD PARTY] and [BV] (Blas Vargas, Nov 17).
 // Third-party:  Monday.com (through our server and monday_service_CG.py).
 // ============================================================================
+import { kioskFetch } from "./integration_BV";  // [BV] adds the kiosk header and the signed-out check to every call
 // monday_CG.ts, browser side
 //
 // saves a finished renewal to our monday.com crm board
@@ -26,7 +26,7 @@ export async function createMondayRecord(
   fields: Record<string, string | number>
 ): Promise<MondayResult> {
   try {
-    const response = await kioskFetch("/api/monday/create_record", {   // our route, not monday's
+    const response = await kioskFetch("/api/monday/create_record", {   // our route, not monday's. [BV] was fetch
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ itemName, fields }),

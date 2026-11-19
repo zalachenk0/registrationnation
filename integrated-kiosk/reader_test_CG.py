@@ -14,6 +14,8 @@ Run from this folder (the same folder as .env):
   python3 reader_test_CG.py check                shows your Stripe setup, locations and readers, and what the kiosk will use
   python3 reader_test_CG.py register CODE        registers a new reader using the code shown on its screen
   python3 reader_test_CG.py pay [DOLLARS]        sends a test payment to the reader, then you tap the Stripe TEST card on it
+  python3 reader_test_CG.py speed                times a few trips from this computer to Stripe, to tell a slow kiosk
+                                                 connection from a slow reader
 
 It talks to Stripe from this computer only. The reader receives the payment from Stripe over the internet, so it does not
 need to be on the same network as this computer (the kiosk screen's own reader connection does, see READER_TEST_TODAY.md).
@@ -32,6 +34,9 @@ import stripe
 ROOT = Path(__file__).resolve().parent
 POLL_SECONDS = 2  # how often to ask stripe what the reader is doing
 WAIT_SECONDS = 120  # how long to wait for someone to tap the card before giving up
+SPEED_TRIPS = 5  # [CG] trips to Stripe timed by the speed command
+SLOW_SEND_SECONDS = 5  # [CG] a reader taking longer than this to accept a payment has a weak connection
+clock = time.monotonic  # [CG] times the trips to Stripe (the tests swap in their own clock)
 
 
 class ToolError(Exception):
@@ -157,6 +162,39 @@ def pick_reader() -> stripe.terminal.Reader:  # [3RD PARTY: Stripe API]
     return online[0]
 
 
+# [CG] runs one step, prints how long it took, and hands back its result and the seconds
+def timed(label: str, step):
+    started = clock()
+    result = step()
+    took = clock() - started
+    say(f"  {label}: {took:.1f} s")
+    return result, took
+
+
+def speed() -> int:
+    """[CG] Pressing Pay makes about six trips to Stripe in a row before the reader gets the payment, so a slow trip
+    from this computer adds up. This times a few harmless ones (just asking Stripe about the reader)."""
+    setup()
+    reader = pick_reader()
+    say(f"\nTiming {SPEED_TRIPS} trips from this computer to Stripe (asking about reader {reader.id}):")
+    times = []
+    for number in range(1, SPEED_TRIPS + 1):
+        _, took = timed(f"trip {number}", lambda: stripe.terminal.Reader.retrieve(reader.id))  # [3RD PARTY: Stripe API]
+        times.append(took)
+    typical = sorted(times)[len(times) // 2]  # the middle one. The first trip also sets up the connection, so it's often slower
+    say(f"Typical trip: {typical:.1f} s.")
+    if typical < 1.0:
+        say("This computer's connection to Stripe is fine. If Pay is still slow, the reader is the slow link:"
+            " check its Wi-Fi signal, or run  pay  and watch how long the reader takes to show the amount.\n")
+    elif typical < 2.5:
+        say("This computer's connection to Stripe is a bit slow. Pressing Pay makes about six of these trips in a row,"
+            " so it adds several seconds before the reader is even asked.\n")
+    else:
+        say("This computer's connection to Stripe is slow, and that's likely what delays Pay or makes it time out."
+            " Try a wired connection or a different network for this computer.\n")
+    return 0
+
+
 def card_description(intent_id: str) -> str:
     try:
         intent = stripe.PaymentIntent.retrieve(intent_id, expand=["latest_charge"])  # [3RD PARTY: Stripe API]
@@ -194,13 +232,16 @@ def pay(amount: str) -> int:
         raise ToolError("Use an amount between $0.50 (Stripe's minimum) and $1,000.00 for a test.")
     reader = pick_reader()
     say(f"\nUsing reader {reader.id} ({reader.label or 'no name'}).")
-    intent = stripe.PaymentIntent.create(  # [3RD PARTY: Stripe API]
+    intent, _ = timed("Making the payment at Stripe", lambda: stripe.PaymentIntent.create(  # [3RD PARTY: Stripe API]
         amount=cents, currency="usd", payment_method_types=["card_present"], capture_method="manual",
         description="Registration Nation reader test", metadata={"kiosk_test": "reader_test_CG.py"},
         idempotency_key="reader-test-" + uuid.uuid4().hex,
-    )
+    ))
     try:
-        stripe.terminal.Reader.retrieve(reader.id).process_payment_intent(payment_intent=intent.id)  # [3RD PARTY: Stripe API]
+        _, took = timed("Sending it to the reader",  # [CG] Stripe answers once the reader has taken the payment
+                        lambda: stripe.terminal.Reader.retrieve(reader.id).process_payment_intent(payment_intent=intent.id))  # [3RD PARTY: Stripe API]
+        if took > SLOW_SEND_SECONDS:
+            say("  The reader was slow to take the payment, so its connection is the slow link: check its Wi-Fi signal.")
     except stripe.StripeError as exc:
         stripe.PaymentIntent.cancel(intent.id)  # [3RD PARTY: Stripe API]
         raise ToolError(f"Stripe could not send the payment to the reader: {exc.user_message or exc}\n"
@@ -241,6 +282,8 @@ def main(argv: list[str]) -> int:
             return register(argv[2], " ".join(argv[3:]) or "Kiosk reader")
         if command == "pay":
             return pay(argv[2] if len(argv) > 2 else "1.00")
+        if command == "speed":
+            return speed()
     except ToolError as exc:
         say(f"\nProblem: {exc}\n")
         return 1

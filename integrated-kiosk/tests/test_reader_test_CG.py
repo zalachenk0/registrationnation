@@ -293,3 +293,52 @@ def test_a_problem_reading_the_card_details_never_turns_a_good_payment_into_a_fa
 
 def test_unknown_commands_print_help(fake, capsys):
     assert run('dance') == 2 and 'python3 reader_test_CG.py check' in capsys.readouterr().out
+
+
+# ---------- [CG] timing: is the kiosk's connection or the reader the slow link? ----------
+
+class Clock:
+    """Each timed step takes the next of these many seconds (the last one repeats)."""
+
+    def __init__(self, *durations):
+        self.durations, self.now, self.ending = list(durations), 0.0, False
+
+    def __call__(self):
+        if self.ending:
+            self.now += self.durations.pop(0) if len(self.durations) > 1 else self.durations[0]
+        self.ending = not self.ending
+        return self.now
+
+
+@pytest.mark.parametrize('seconds,verdict', [(0.3, 'connection to Stripe is fine'), (1.5, 'a bit slow'), (3.0, 'is slow')])
+def test_speed_times_trips_to_stripe_and_says_which_side_is_slow(fake, monkeypatch, capsys, seconds, verdict):
+    monkeypatch.setattr(reader_test, 'clock', Clock(seconds))
+    assert run('speed') == 0
+    out = capsys.readouterr().out
+    assert out.count('trip ') == reader_test.SPEED_TRIPS and f'Typical trip: {seconds:.1f} s' in out and verdict in out
+    assert steps(fake) == []                                        # only looks: nothing created, sent or charged
+
+
+def test_a_slow_first_trip_from_setting_up_the_connection_is_not_the_verdict(fake, monkeypatch, capsys):
+    monkeypatch.setattr(reader_test, 'clock', Clock(4.0, 0.3))
+    run('speed')
+    assert 'connection to Stripe is fine' in capsys.readouterr().out
+
+
+def test_speed_with_no_reader_online_explains_instead_of_timing(fake, capsys):
+    fake.readers[0].status = 'offline'
+    assert run('speed') == 1 and 'No physical reader is online' in capsys.readouterr().out
+
+
+def test_pay_shows_how_long_each_step_took_and_flags_a_slow_reader(fake, monkeypatch, capsys):
+    monkeypatch.setattr(reader_test, 'clock', Clock(0.4, 7.0))
+    assert run('pay', '114.25') == 0
+    out = capsys.readouterr().out
+    assert 'Making the payment at Stripe: 0.4 s' in out and 'Sending it to the reader: 7.0 s' in out
+    assert 'reader was slow to take the payment' in out and steps(fake) == ['create', 'send', 'capture']
+
+
+def test_pay_with_a_quick_reader_does_not_blame_it(fake, monkeypatch, capsys):
+    monkeypatch.setattr(reader_test, 'clock', Clock(0.4, 1.0))
+    run('pay', '114.25')
+    assert 'reader was slow' not in capsys.readouterr().out

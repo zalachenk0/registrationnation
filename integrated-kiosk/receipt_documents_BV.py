@@ -1,10 +1,11 @@
 # ============================================================================
 # File:         receipt_documents_BV.py
-# Written by:   BV (Blas Vargas)
+# Written by:   BV (Blas Vargas); CG (reads the shorter transaction ID, tagged [CG])
 # What it does: Draws the two page print-out: the mock sticker and the Texas Tag
 #               & Title receipt.
-# Team-written: Logic written by BV (Blas Vargas). Outside code is used only
-#               through the third-party sources listed below.
+# Team-written: Logic written by BV (Blas Vargas); CG (lines tagged [CG]).
+#               Outside code is used only through the third-party sources
+#               listed below.
 # Third-party:  pypdf; ReportLab; assets/ttt-receipt.pdf is Texas Tag & Title's
 #               own receipt form, provided by the sponsor.
 # ============================================================================
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -49,8 +51,15 @@ def build_documents(data, payment=None, *, today=None):
     # The public printing wrapper validates data; keep this internal API reusable for previews/tests.
     today = today or datetime.now(ZoneInfo(os.getenv('KIOSK_TIMEZONE', 'America/Chicago'))).date()
     reference = data['confirmation_number']
-    transaction_time = None
-    if '-RN-Kiosk-1-' in reference:
+    transaction_time, kiosk = None, 'RN-Kiosk-1'
+    short = re.fullmatch(r'RN(\d{1,3})-(\d{8})-(\d{6})-[0-9A-F]{6}', reference)  # [CG] RN1-20261119-075512-A3F9C2: kiosk, UTC date and time, random
+    if short:
+        try:
+            transaction_time = datetime.strptime(short[2] + short[3], '%Y%m%d%H%M%S')
+            kiosk = f'RN-Kiosk-{int(short[1])}'
+        except ValueError:
+            pass
+    elif '-RN-Kiosk-1-' in reference:  # the longer ID used before Nov 19, still read so a reprint of an older renewal shows its time
         try:
             transaction_time = datetime.strptime(reference.split('-', 1)[0], '%Y%m%dT%H%M%S%fZ')
         except ValueError:
@@ -153,7 +162,7 @@ def build_documents(data, payment=None, *, today=None):
     pdf.setFont('Helvetica', 9)
     pdf.drawString(125.45, 585, f'Date: {today:%m/%d/%Y}     Renewal: {month:02d}/{year}')
     if transaction_time:
-        pdf.drawString(322, 585, f'{transaction_time:%m/%d/%Y %H:%M:%S} UTC  |  RN-Kiosk-1')
+        pdf.drawString(322, 585, f'{transaction_time:%m/%d/%Y %H:%M:%S} UTC  |  {kiosk}')
     pdf.setFillColor(black)
     pdf.setFont('Helvetica', 9)
     fees = (8725, 2164, 536) if amount == 11425 else (None, None, None)

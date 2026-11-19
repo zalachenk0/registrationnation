@@ -491,3 +491,27 @@ def test_the_reader_check_never_raises(env, monkeypatch):
     service, fake = env
     monkeypatch.setattr(stripe.terminal.Reader, 'retrieve', lambda *a, **k: (_ for _ in ()).throw(stripe_error('api_error')))
     assert payment.reader_working_on('pi_anything') is False
+
+
+# ---------- [CG] speed: fewer and faster trips to Stripe when Pay is pressed ----------
+
+def test_pressing_pay_asks_stripe_for_the_payment_only_once(env, monkeypatch):
+    service, fake = env
+    ask = by_id(service)
+    lookups = []
+    real = stripe.PaymentIntent.retrieve
+    monkeypatch.setattr(stripe.PaymentIntent, 'retrieve', lambda *a, **k: (lookups.append(a), real(*a, **k))[1])
+    assert service.start_on_reader(ask)['reader'] == 'waiting'
+    assert len(lookups) == 1 and fake.sent == [('tmr_kiosk', ask['payment_intent'])]   # one lookup, and still sent once
+
+
+def test_the_connection_to_stripe_is_made_once_and_kept(env, monkeypatch):
+    monkeypatch.setattr(payment, '_HTTP', None)
+    payment._client()
+    first = stripe.default_http_client
+    payment._client()
+    payment._client()
+    assert stripe.default_http_client is first and isinstance(first, stripe.RequestsClient)   # every request reuses it
+    monkeypatch.setattr(stripe, 'default_http_client', None)        # if anything else swaps it out...
+    payment._client()
+    assert stripe.default_http_client is first                       # ...the kept one comes back, still with its connections

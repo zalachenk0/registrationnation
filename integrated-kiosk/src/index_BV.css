@@ -1,6 +1,7 @@
 /* ============================================================================
  * File:         index_BV.css
- * Written by:   BV (Blas Vargas)
+ * Written by:   BV (Blas Vargas); CG (the touch keyboard styles copied back,
+ *               tagged [CG])
  * What it does: Page styling.
  * Team-written: Logic written by BV (Blas Vargas). Outside code is used only
  *               through the third-party sources listed below.
@@ -82,3 +83,29 @@ input, select, textarea {
   --text-2xl: calc(1.5rem + 2px);
   --text-3xl: calc(1.875rem + 2px);
 }
+
+/* [CG] the on-screen keyboard (TouchKeyboard_BV_CG.tsx). BV's styles, copied back from the compiled form the Pi ran
+   before Nov 17, because the Nov 17 rebuild from src/ dropped them. The page leaves room at the bottom for it. */
+html { scroll-padding-bottom: var(--touch-keyboard-height, 0px); }
+body { padding-bottom: var(--touch-keyboard-height, 0px); }
+.touch-keyboard {
+  position: fixed; left: 50%; bottom: 8px; transform: translate(-50%); z-index: 10000;
+  width: min(840px, 100vw - 16px); padding: 8px; border: 1px solid var(--border); border-radius: 12px;
+  background: #e8edf3; box-shadow: 0 -4px 24px #0f192333; -webkit-user-select: none; user-select: none;
+}
+.touch-keyboard-numeric { width: min(360px, 100vw - 16px); }
+.touch-keyboard-bar { display: flex; justify-content: space-between; align-items: center; padding-bottom: 6px; font-size: 12px; }
+.touch-keyboard-bar .touch-key { flex: none; min-height: 30px; padding: 0 12px; font-size: 12px; }
+.touch-keyboard-row { display: flex; gap: 5px; margin-top: 5px; }
+.touch-keyboard-characters { justify-content: center; }
+.touch-keyboard-characters > .touch-key { flex: 0 0 calc(9.09091% - 4.54545px); }
+.touch-keyboard-numeric .touch-keyboard-characters > .touch-key { flex-basis: calc(25% - 3.75px); }
+.touch-key {
+  flex: 1; min-width: 0; min-height: 40px; font-size: 18px; color: #1a3a5c; background: #fff;
+  border: 1px solid #c4cfdd; border-radius: 6px; touch-action: manipulation;
+}
+.touch-key:active { background: #ccd9e8; }
+.touch-key:focus-visible { outline: 3px solid var(--accent); }
+.touch-key-wide { flex: 1.5; }
+.touch-key-space { flex: 4; }
+.touch-key-done { background: var(--primary); color: #fff; }

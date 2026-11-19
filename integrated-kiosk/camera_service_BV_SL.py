@@ -1,12 +1,15 @@
 # ============================================================================
 # File:         camera_service_BV_SL.py
 # Written by:   BV (camera sharing for the web preview); SL (USB document camera
-#               support and focus sweep)
+#               support and focus sweep); CG (refocusing the preview when a
+#               document is placed)
 # What it does: Opens the document camera once and shares it between the live
 #               preview and full-size captures.
 # Team-written: Logic written by BV (camera sharing for the web preview); SL
-#               (USB document camera support and focus sweep). Outside code is
-#               used only through the third-party sources listed below.
+#               (USB document camera support and focus sweep); CG (refocusing
+#               the preview when a document is placed, lines tagged [CG]).
+#               Outside code is used only through the third-party sources
+#               listed below.
 # Third-party:  OpenCV; Picamera2; libcamera; Picamera2 and libcamera (Pi
 #               camera, used only on the Pi).
 # ============================================================================
@@ -34,6 +37,11 @@ def _index(value):
     """A V4L2/DirectShow index ("0") or a device path ("/dev/v4l/by-id/...")."""
     value = value.strip()
     return int(value) if value.lstrip('-').isdigit() else value
+
+
+def _switch(name, default):
+    """[CG] An on/off setting from the environment: 0, false, no or off turn it off."""
+    return os.getenv(name, default).strip().lower() not in {'0', 'false', 'no', 'off'}
 
 
 def _manual(name, default):
@@ -81,6 +89,26 @@ class Settings:
     focus_step: int = field(default_factory=lambda: int(os.getenv('KIOSK_CAMERA_FOCUS_STEP', '20')))
     # Time for the lens motor to move and a new frame to arrive before measuring
     focus_settle: float = field(default_factory=lambda: float(os.getenv('KIOSK_CAMERA_FOCUS_SETTLE', '0.5')))
+    # [CG] Same camera and sweep: also refocus while the preview is showing, as soon as a document is placed and held
+    # still, so the customer sees it sharp before pressing Scan. KIOSK_CAMERA_PREVIEW_FOCUS=0 turns it off.
+    preview_focus: bool = field(default_factory=lambda: _switch('KIOSK_CAMERA_PREVIEW_FOCUS', '1'))
+    # [CG] How different the picture must be from the one last focused on to count as a new document, as an average
+    # change in brightness (0-255) on a small copy of the preview. Raise it if the lens moves with nothing placed.
+    scene_change: float = field(default_factory=lambda: float(os.getenv('KIOSK_CAMERA_SCENE_CHANGE', '6')))
+    # [CG] Seconds the picture must stay still (no hand moving) before refocusing
+    scene_still: float = field(default_factory=lambda: float(os.getenv('KIOSK_CAMERA_SCENE_STILL', '0.8')))
+
+
+def thumbnail(image):
+    """[CG] A tiny, softened grey copy of the preview: enough to see a document arrive or a hand move, not detail."""
+    small = cv2.resize(image, (64, 48), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+    return cv2.GaussianBlur(gray, (3, 3), 0)
+
+
+def difference(a, b):
+    """[CG] Average brightness change between two thumbnails, 0-255."""
+    return float(cv2.absdiff(a, b).mean())
 
 
 def sharpness(frame):
@@ -111,6 +139,13 @@ class Camera:
         self.focus_requested = False
         self.focus_done_at = 0.0
         self.focus_sharpness = 0.0
+        # [CG] preview refocus: True while the lens is still sharp for the document in view (no change since the
+        # last sweep), so a capture can skip its own sweep. Only ever True with preview_focus on
+        self.focus_fresh = False
+        self._scene_focused = None  # thumbnail of the picture the lens was last focused on (None: not yet)
+        self._scene_last = None  # thumbnail of the previous preview frame
+        self._still_since = 0.0  # when the picture last stopped moving
+        self._rebase = False  # the next preview frame becomes _scene_focused (a sweep just finished)
 
     def status(self):
         with self.condition:
@@ -224,8 +259,11 @@ class Camera:
                     sweep = self.focus_requested
                 if sweep:
                     self._sweep_focus(read)
+                    self._rebase = True  # [CG] the next frame shows what the lens is now focused on
                     continue
-                self._publish(frame)
+                preview = self._publish(frame)
+                if self._focus_to is not None and self.settings.preview_focus:
+                    self._watch_scene(preview)  # [CG]
                 self.stop.wait(max(0, 1 / self.settings.fps - (time.monotonic() - started)))
         except Exception as exc:
             with self.condition:
@@ -233,6 +271,9 @@ class Camera:
                 self.condition.notify_all()
         finally:
             self._focus_to = None
+            # [CG] a closed camera remembers nothing about what was in view: the next open focuses afresh
+            self._scene_focused = self._scene_last = None
+            self._rebase = False
             if close:
                 try:
                     close()
@@ -240,6 +281,7 @@ class Camera:
                     pass
             with self.condition:
                 self.frame = self.jpeg = None
+                self.focus_fresh = False  # [CG]
                 self.thread = None
                 self.condition.notify_all()
 
@@ -258,6 +300,32 @@ class Camera:
             self.frame, self.jpeg = frame, jpg.tobytes()
             self.frame_time = time.monotonic()
             self.condition.notify_all()
+        return preview  # [CG] the small copy is reused to watch for a document arriving
+
+    def _watch_scene(self, preview):
+        """[CG] Refocuses during the preview: once the picture differs from the one the lens was focused on (a document
+        was placed, swapped or moved) and then stays still for scene_still seconds, the usual sweep runs right away,
+        so the preview turns sharp without waiting for Scan. A hand still moving, or frame-to-frame noise, never starts it."""
+        s = self.settings
+        thumb = thumbnail(preview)
+        now = time.monotonic()
+        if self._rebase:  # a sweep just finished: this is the picture the lens is sharp for
+            self._scene_focused, self._scene_last, self._still_since, self._rebase = thumb, thumb, now, False
+            with self.condition:
+                self.focus_fresh = True
+            return
+        still = max(1.5, s.scene_change / 3)  # smaller than a new document, bigger than noise
+        if self._scene_last is None or difference(thumb, self._scene_last) > still:
+            self._still_since = now  # moving (or just opened): start the stillness clock again
+        self._scene_last = thumb
+        # nothing focused on yet since the camera opened (the document may already be in place) counts as a change
+        changed = self._scene_focused is None or difference(thumb, self._scene_focused) > s.scene_change
+        if not changed:
+            return
+        with self.condition:
+            self.focus_fresh = False  # the lens may not suit what's in view now, so a capture sweeps again
+            if now - self._still_since >= s.scene_still and not self.focus_requested:
+                self.focus_requested = True
 
     def _measure(self, read, position):
         """Moves the lens, waits for it to settle (keeping the preview live), returns the sharpness."""
@@ -332,6 +400,9 @@ class Camera:
             # A capture first refocuses on the document (USB camera, manual focus)
             sweep = not preview and self.settings.focus is not None and self.settings.focus_sweep \
                 and self.settings.backend == 'opencv'
+            # [CG] ...unless the preview already focused on this exact document and nothing has moved since
+            if sweep and self.settings.preview_focus and self.focus_fresh:
+                sweep = False
             if sweep:
                 self.focus_requested = True
                 timeout += 15

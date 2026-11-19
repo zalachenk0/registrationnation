@@ -4,8 +4,11 @@
 // What it does: Tests dist/reader-only_CG.js, which makes today's compiled
 //               kiosk form card-reader only: the "enter the card manually"
 //               button is hidden and the messages that mention it are fixed.
-//               Also checks that current builds use the server-driven reader directly.
-// Team-written: Logic written by CG (Cristian Gonzalez).
+//               Also checks that current builds use the server-driven reader
+//               directly.
+// Team-written: Logic written by CG (Cristian Gonzalez); the first test was
+//               reworked by BV (Blas Vargas, Nov 17) for builds made from src/,
+//               tagged [BV].
 // Third-party:  Node's built-in test runner; jsdom (a browser page in Node).
 // ============================================================================
 import assert from 'node:assert/strict';
@@ -41,7 +44,7 @@ const READER_STEP = `
   <button type="button" id="manual" style="border:1px solid">${MANUAL_BUTTON}</button>
   <div role="alert"><p id="error"></p><button type="button" id="retry">Retry connecting</button></div>`;
 
-test('the compiled kiosk limits payments to the card reader', () => {
+test('the compiled kiosk limits payments to the card reader', () => {  // [BV]
   const legacyBundle = index.includes('/reader-only_CG.js');
   for (const text of [MANUAL_BUTTON, TOO_SLOW, CANCELED, TRY_AGAIN, ANOTHER_CARD]) {
     assert.equal(bundle.includes(text), legacyBundle, bundleName + ': ' + text);

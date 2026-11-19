@@ -1,23 +1,26 @@
 // ============================================================================
 // File:         App_BV_CG.tsx
 // Written by:   BV (the form, steps and screens); CG (payment and Monday.com
-//               calls, tagged [CG]); SL (scan prompts)
+//               calls, the Nov 19 fixes from the sponsor meeting notes and the
+//               pieces brought back from the earlier compiled form, tagged
+//               [CG]); SL (scan prompts)
 // What it does: The whole touchscreen form: steps, scan prompts, review,
 //               payment, printing and the final screen.
-// Team-written: Logic written by BV (the form, steps and screens); CG (payment
-//               and Monday.com calls, tagged [CG]); SL (scan prompts). Outside
-//               code is used only through the third-party sources listed below.
+// Team-written: Logic written by BV (the form, steps and screens); CG (lines
+//               tagged [CG]); SL (scan prompts). Outside code is used only
+//               through the third-party sources listed below.
 // Third-party:  React; Tailwind CSS styling; the page layout started from a
 //               Figma design export (see the figma markers in index.html).
 // ============================================================================
-import { useState, useRef, useEffect, useId } from "react";
+import { useState, useRef, useEffect, useId, createContext, useContext } from "react";
 import logoUrl from "./imports/RN_Logo.png";
-import { fillBlank, requestScan, submitPrint, printStatus, kioskFetch, type PrintStatus, type ScanResult } from "./integration_BV";
+import { fillBlank, requestScan, submitPrint, printStatus, kioskFetch, saveLicenseFront, requestSecurityPhoto, staffSession, signOut, type PrintStatus, type ScanResult, type StaffUser } from "./integration_BV";
 import { PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG"; // [CG]
 import { TerminalPayment } from "./TerminalPayment_CG";
 import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
-import { displayDate, normalizeDate, renewalError } from "./renewal_BV";
+import { displayDate, normalizeDate, renewalError, stepError, firstBlank, type FormStep } from "./renewal_BV";
+import { transactionId } from "./transaction_CG"; // [CG]
 import { counties, providers, vehicleModels, makes } from "./renewalOptions_BV";
 
 const STATE_CODES = "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split(" ");
@@ -73,9 +76,10 @@ const US_STATES = [
   "Wisconsin","Wyoming",
 ];
 
+// [CG] step 1 is where the license is scanned, so its label says so (the sponsor found the license scan hard to spot)
 const STEPS = [
-  { number: 1, label: "Personal Info" },
-  { number: 2, label: "Driver's License" },
+  { number: 1, label: "Scan License" },
+  { number: 2, label: "License Details" },
   { number: 3, label: "Insurance & Vehicle" },
   { number: 4, label: "Review" },
   { number: 5, label: "Payment" },
@@ -88,7 +92,7 @@ function ProgressBar({ current }: { current: Step }) {
         <div
           className="absolute top-4 left-0 h-0.5 transition-all duration-500"
           style={{
-            width: `${((current - 1) / 3) * 100}%`,
+            width: `${((current - 1) / (STEPS.length - 1)) * 100}%`,  // [CG] was / 3, which ran past the end on step 5
             backgroundColor: "var(--primary)",
           }}
         />
@@ -128,24 +132,54 @@ function ProgressBar({ current }: { current: Step }) {
   );
 }
 
+// [CG] how sure the scanner was about each field it filled in (0-1), keyed by the form field's name. The meeting asked for a
+// confidence percentage on autofilled fields, with the shaky ones highlighted. Typing in a field clears its mark, because
+// then it's the customer's own value. The license barcode is read exactly, so its fields show 100%
+export const CONFIDENT = 0.8;  // below this the field is highlighted and the customer is asked to check it
+const ScanConfidence = createContext<{
+  scores: Record<string, number>; clear: (name: string) => void; mark: (scores: Record<string, number>) => void; missing: string;
+}>({ scores: {}, clear: () => undefined, mark: () => undefined, missing: "" });
+
+// the fields a scan actually filled in: blank before, and the scan had a value for them (fillBlank never overwrites)
+function filledByScan<T extends object>(current: T, incoming: Partial<Record<keyof T, string | undefined>>): (keyof T)[] {
+  return (Object.keys(incoming) as (keyof T)[]).filter(key => !String(current[key] ?? "").trim() && incoming[key]?.trim());
+}
+
 function Field({
   label,
   required,
   children,
   hint,
+  name,
 }: {
   label: string;
   required?: boolean;
   children: React.ReactNode;
   hint?: string;
+  name?: string;  // [CG] the form field this is, for its scan confidence and the "fill this in" highlight
 }) {
+  const { scores, clear, missing } = useContext(ScanConfidence);
+  const score = name !== undefined ? scores[name] : undefined;
+  const shaky = score !== undefined && score < CONFIDENT;
+  const blank = name !== undefined && name === missing;
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium" style={{ color: "var(--foreground)" }}>
-        {label}
-        {required && <span style={{ color: "#e05a1a" }} className="ml-0.5">*</span>}
+    <div className="flex flex-col gap-1.5 rounded-md" data-field={name}
+      style={shaky || blank ? { outline: `2px solid ${blank ? "#b42318" : "#d97706"}`, outlineOffset: 4 } : undefined}
+      onInputCapture={() => { if (name) clear(name); }}>
+      <label className="text-sm font-medium flex items-center gap-2 flex-wrap" style={{ color: "var(--foreground)" }}>
+        <span>
+          {label}
+          {required && <span style={{ color: "#e05a1a" }} className="ml-0.5">*</span>}
+        </span>
+        {score !== undefined && (
+          <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
+            style={shaky ? { backgroundColor: "#fef3c7", color: "#92400e" } : { backgroundColor: "#e6f4e8", color: "#2d6636" }}>
+            {shaky ? `Please check · scanned ${Math.round(score * 100)}% sure` : `Scanned · ${Math.round(score * 100)}% sure`}
+          </span>
+        )}
       </label>
       {children}
+      {blank && <p className="text-xs font-semibold" style={{ color: "#b42318" }}>This field is required.</p>}
       {hint && <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>{hint}</p>}
     </div>
   );
@@ -190,6 +224,7 @@ function InputEl({ choices, ...props }: React.InputHTMLAttributes<HTMLInputEleme
       value={date ? displayDate(String(props.value ?? "")) : props.value}
       placeholder={date ? "MM/DD/YYYY" : props.placeholder}
       inputMode={date ? "numeric" : tel ? "tel" : props.inputMode}
+      data-keypad={date || tel || props.name === "zip" || props.inputMode === "numeric" ? "numeric" : undefined}  // [CG] opens the touch keyboard's number pad
       maxLength={props.maxLength ?? (date ? 10 : tel ? 12 : undefined)}
       list={choices ? listId : props.list}
       onChange={handleChange}
@@ -244,6 +279,8 @@ function Step1({
 }) {
   const [scanned, setScanned] = useState(licenseScanned);
   const [expanded, setExpanded] = useState(licenseScanned || Boolean(data.firstName || data.address));
+  const { mark, missing } = useContext(ScanConfidence);
+  const showAll = expanded || Boolean(missing && missing in data);  // [CG] a blank Continue stopped on must be visible
   const set = (k: keyof PersonalInfo) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     onChange({ ...data, [k]: e.target.value });
 
@@ -251,11 +288,13 @@ function Step1({
     setScanned(true);
     setExpanded(true);
     const f = result.fields;
-    onChange(current => fillBlank(current, {
+    const incoming = {
       firstName: f.customer_first_name, lastName: f.customer_last_name,
       dateOfBirth: normalizeDate(f.date_of_birth ?? ""), address: f.street_address,
       city: f.city, state: stateName(f.state), zip: f.zip_code,
-    }));
+    };
+    mark(Object.fromEntries(filledByScan(data, incoming).map(key => [key, 1])));  // [CG] barcode: read exactly
+    onChange(current => fillBlank(current, incoming));
     onLicenseScan(result);
   };
 
@@ -263,67 +302,68 @@ function Step1({
     <div className="flex flex-col gap-6">
       <ScanPrompt
         title="Scan Your Driver's License"
-        subtitle="Place your driver’s license under the camera, then scan it."
+        subtitle="Put your driver’s license in the scanner box. The camera will take a photo of the front, then read the barcode on the back."
         docType="license"
         scanned={scanned}
         onScan={handleScan}
         onManual={() => setExpanded(true)}
+        autoOpen
       />
 
       {/* Contact — always manual */}
       <div className="flex flex-col gap-5">
         <div className="flex items-center gap-3">
           <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
-          <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Enter manually</span>
+          <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Type your email and phone</span>
           <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-          <Field label="Email Address" required>
+          <Field label="Email Address" required name="email" hint="Your receipt is emailed here.">
             <InputEl maxLength={120} type="email" placeholder="margaret.sullivan@email.com" value={data.email} onChange={set("email")} />
           </Field>
-          <Field label="Phone Number" required>
+          <Field label="Phone Number" required name="phone">
             <InputEl type="tel" placeholder="(555) 867-5309" value={data.phone} onChange={set("phone")} />
           </Field>
         </div>
       </div>
 
       {/* Personal fields — pre-filled by scan, editable */}
-      {expanded && (
+      {showAll && (
         <div className="flex flex-col gap-5">
           <div className="flex items-center gap-3">
             <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
-            <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>From license — review & edit</span>
+            <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>From your license — check each one</span>
             <div className="h-px flex-1" style={{ backgroundColor: "var(--border)" }} />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            <Field label="First Name" required>
+            <Field label="First Name" required name="firstName">
               <InputEl maxLength={35} placeholder="Margaret" value={data.firstName} onChange={set("firstName")} />
             </Field>
-            <Field label="Last Name" required>
+            <Field label="Last Name" required name="lastName">
               <InputEl maxLength={35} placeholder="Sullivan" value={data.lastName} onChange={set("lastName")} />
             </Field>
           </div>
-          <Field label="Date of Birth" required>
+          <Field label="Date of Birth" required name="dateOfBirth">
             <InputEl type="date" value={data.dateOfBirth} onChange={set("dateOfBirth")} />
           </Field>
-          <Field label="Registration County" required>
+          <Field label="Registration County" required name="county" hint="The Texas county where the vehicle is registered.">
             <InputEl choices={counties} value={data.county} onChange={set("county")} placeholder="Search or enter county" maxLength={45} />
           </Field>
-          <Field label="Street Address" required>
+          <Field label="Street Address" required name="address">
             <InputEl maxLength={80} placeholder="742 Evergreen Terrace" value={data.address} onChange={set("address")} />
           </Field>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-5">
-            <Field label="City" required>
+            <Field label="City" required name="city">
               <InputEl maxLength={45} placeholder="Austin" value={data.city} onChange={set("city")} />
             </Field>
-            <Field label="State" required>
+            <Field label="State" required name="state">
               <SelectEl value={data.state} onChange={set("state")}>
                 {data.state && !US_STATES.includes(data.state) && <option>{data.state}</option>}
                 <option value="">Select</option>
                 {US_STATES.map((s) => <option key={s}>{s}</option>)}
               </SelectEl>
             </Field>
-            <Field label="ZIP Code" required>
+            <Field label="ZIP Code" required name="zip">
               <InputEl name="zip" inputMode="numeric" placeholder="78701" value={data.zip} onChange={set("zip")} maxLength={10} />
             </Field>
           </div>
@@ -378,17 +418,46 @@ function CameraModal({
     return () => { controller.abort(); clearTimeout(timer); if (currentUrl) URL.revokeObjectURL(currentUrl); };
   }, []);
 
-  const handleCapture = () => { if (frameUrl && !camError) onCapture(); };
+  // [CG] license: the front is photographed first (for the Monday record), then the back's barcode is scanned. Brought back
+  // from the earlier compiled form (BV's two-step design); the Nov 17 rebuild from src/ only had the barcode step
+  const [frontSaved, setFrontSaved] = useState(false);
+  const [savingFront, setSavingFront] = useState(false);
+  const [captureError, setCaptureError] = useState("");
+  const saving = useRef<AbortController | null>(null);
+  useEffect(() => () => saving.current?.abort(), []);
+  const handleCapture = async () => {
+    if (!frameUrl || camError || saving.current) return;
+    if (docType !== "license" || frontSaved) { onCapture(); return; }
+    const controller = new AbortController();
+    saving.current = controller;
+    setSavingFront(true); setCaptureError("");
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      await saveLicenseFront(controller.signal);
+      if (!controller.signal.aborted) setFrontSaved(true);
+    } catch (error) {
+      setCaptureError(controller.signal.aborted ? "Photo capture timed out. Please try again."
+        : error instanceof Error ? error.message : "The front photo could not be saved. Please try again.");
+    } finally {
+      clearTimeout(timer); saving.current = null; setSavingFront(false);
+    }
+  };
   const handleClose = onClose;
 
   const [insuranceFormat, setInsuranceFormat] = useState<"paper" | "phone">("paper");
   const shape = docType === "license" ? "license" : insuranceFormat;
   const guides = {
-    license: {
-      title: "Position Your Driver’s License",
-      subtitle: "Place the back of your license under the camera, long edge horizontal.",
-      position: "Landscape · Back side", label: "Keep your whole license visible",
+    license: frontSaved ? {
+      title: "Now Flip Your License Over",
+      subtitle: "Front photo saved. Turn your license over so the barcode on the back faces up.",
+      position: "Step 2 of 2 · Back side", label: "Keep your whole license visible",
       detail: "Keep the full barcode visible",
+      tip: "Center the license beneath the camera. Keep all four corners visible and hold it still.",
+    } : {
+      title: "Photograph the Front of Your License",
+      subtitle: "Place your license in the box with the photo side facing up, long edge left to right.",
+      position: "Step 1 of 2 · Front side", label: "Keep your whole license visible",
+      detail: "Keep your photo and all front-side details visible",
       tip: "Center the license beneath the camera. Keep all four corners visible and hold it still.",
     },
     paper: {
@@ -461,17 +530,20 @@ function CameraModal({
         <div className="flex gap-3">
           <button onClick={handleClose} className="flex-1 py-3 rounded-lg text-sm font-medium"
             style={{ backgroundColor: "#202b37", color: "#e2e8ef", border: "1px solid #455260" }}>Cancel</button>
-          <button onClick={handleCapture} disabled={!frameUrl || Boolean(camError)}
+          <button onClick={() => void handleCapture()} disabled={!frameUrl || Boolean(camError) || savingFront}
             className="flex-[2] py-3 rounded-lg text-sm font-semibold disabled:opacity-40 flex items-center justify-center gap-2"
             style={{ backgroundColor: "var(--accent)", color: "#fff" }}>
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
               <circle cx="9" cy="9" r="6" stroke="currentColor" strokeWidth="1.8" />
               <circle cx="9" cy="9" r="3" fill="currentColor" />
             </svg>
-            Capture &amp; Scan
+            {savingFront ? "Saving photo…" : docType === "license" && !frontSaved ? "Take Front Photo" : "Capture & Scan"}
           </button>
         </div>
-        <p className="text-xs text-center" style={{ color: "#aab8c7" }}>Hold still, then select Capture &amp; Scan.</p>
+        {captureError && <p role="alert" className="text-sm text-red-300">{captureError}</p>}
+        <p className="text-xs text-center" style={{ color: "#aab8c7" }}>
+          {docType === "license" && !frontSaved ? "Hold still, then select Take Front Photo." : "Hold still, then select Capture & Scan."}
+        </p>
       </div>
     </div>
   );
@@ -484,6 +556,7 @@ function ScanPrompt({
   scanned,
   onScan,
   onManual,
+  autoOpen,
 }: {
   title: string;
   subtitle: string;
@@ -491,9 +564,19 @@ function ScanPrompt({
   scanned: boolean;
   onScan: (result: ScanResult) => void;
   onManual?: () => void;
+  autoOpen?: boolean;  // [CG] open the camera as soon as the step shows, instead of waiting for Open Scanner
 }) {
   const [state, setState] = useState<ScanState>(scanned ? "done" : "idle");
   const [cameraOpen, setCameraOpen] = useState(false);
+  // [CG] opening the license scanner also asks the security Pi for its license_scan photo (from the earlier compiled form)
+  const openCamera = () => {
+    setCameraOpen(true);
+    if (docType === "license") void requestSecurityPhoto();
+  };
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (autoOpen && !scanned && !autoOpened.current) { autoOpened.current = true; openCamera(); }
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps -- once, when the step first shows
 
   const [error, setError] = useState("");
   const pending = useRef<AbortController | null>(null);
@@ -539,9 +622,9 @@ function ScanPrompt({
         style={{ border: `2px ${state === "done" ? "solid" : "dashed"} ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
       >
         {state === "idle" && (
-          <div className="flex flex-col items-center gap-4 px-6 py-8 text-center">
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ color: "var(--primary)" }}>
+          <div className="flex flex-col items-center gap-4 px-6 py-10 text-center">
+            <div className="w-20 h-20 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" style={{ color: "var(--primary)" }}>
                 <rect x="2" y="6" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
                 <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.5" />
                 <path d="M8 6l1.2-2.4A1 1 0 0110.1 3h3.8a1 1 0 01.9.6L16 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -549,22 +632,22 @@ function ScanPrompt({
               </svg>
             </div>
             <div>
-              <p className="font-semibold text-sm mb-1" style={{ color: "var(--foreground)" }}>{title}</p>
-              <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }} role={error ? "alert" : undefined}>{error || subtitle}</p>
+              <p className="font-semibold text-xl mb-1" style={{ color: "var(--foreground)" }}>{title}</p>
+              <p className="text-sm leading-relaxed" style={{ color: error ? "#b42318" : "var(--muted-foreground)" }} role={error ? "alert" : undefined}>{error || subtitle}</p>
             </div>
             <button
-              onClick={() => setCameraOpen(true)}
-              className="flex items-center justify-center gap-2 px-8 py-3 rounded-lg text-sm font-semibold transition-all duration-150"
+              onClick={openCamera}
+              className="flex items-center justify-center gap-2 px-10 py-4 rounded-lg text-base font-semibold transition-all duration-150"
               style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#d95c1a"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--accent)"; }}
             >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <svg width="20" height="20" viewBox="0 0 16 16" fill="none">
                 <rect x="1" y="3" width="14" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
                 <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.4" />
                 <circle cx="12.5" cy="5.5" r="1" fill="currentColor" />
               </svg>
-              Open Scanner
+              {error ? "Try the Scanner Again" : "Open the Scanner"}
             </button>
           </div>
         )}
@@ -576,7 +659,7 @@ function ScanPrompt({
                 <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="2" strokeOpacity="0.2" />
                 <path d="M10 2a8 8 0 018 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
-              <span className="text-sm font-medium" style={{ color: "var(--primary)" }}>Reading document…</span>
+              <span className="text-base font-medium" style={{ color: "var(--primary)" }}>Reading your document… please wait</span>
             </div>
             <style>{`@keyframes scanline { 0%{top:10%} 100%{top:90%} }`}</style>
             <div className="absolute inset-x-6 top-4 bottom-4 pointer-events-none rounded-lg overflow-hidden" style={{ border: "1px solid rgba(26,58,92,0.15)" }}>
@@ -627,11 +710,12 @@ function Step2({
         style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}
       >
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Driver's License</p>
+        <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>These came from your license's barcode. Fix anything that doesn't match your card.</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-          <Field label="License Number" required>
+          <Field label="License Number" required name="licenseNumber">
             <InputEl maxLength={24} placeholder="D123-4567-8901" value={data.licenseNumber} onChange={set("licenseNumber")} />
           </Field>
-          <Field label="Issuing State" required>
+          <Field label="Issuing State" required name="licenseState">
             <SelectEl value={data.licenseState} onChange={set("licenseState")}>
                 {data.licenseState && !US_STATES.includes(data.licenseState) && <option>{data.licenseState}</option>}
               <option value="">Select</option>
@@ -640,10 +724,10 @@ function Step2({
           </Field>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-          <Field label="Expiration Date" required>
+          <Field label="Expiration Date" required name="expirationDate">
             <InputEl type="date" value={data.expirationDate} onChange={set("expirationDate")} />
           </Field>
-          <Field label="License Class" required>
+          <Field label="License Class" required name="licenseClass">
             <SelectEl value={data.licenseClass} onChange={set("licenseClass")}>
             {data.licenseClass && !["A", "B", "C", "D", "M"].includes(data.licenseClass) && <option>{data.licenseClass}</option>}
               <option value="">Select class</option>
@@ -678,26 +762,33 @@ function Step3({
   const setVehicle = (k: keyof DriversLicense) => (e: React.ChangeEvent<HTMLInputElement>) =>
     onVehicleChange({ ...vehicleData, [k]: e.target.value });
 
+  const { mark } = useContext(ScanConfidence);
   const handleInsuranceScan = (result: ScanResult) => {
     setInsuranceScanned(true);
     const f = result.fields;
-    onChange(current => fillBlank(current, {
-      provider: f.insurance_company, policyNumber: f.policy_number, endDate: normalizeDate(f.insurance_expiration ?? ""),
-    }));
-    onVehicleChange(current => fillBlank(current, {
+    const insuranceIn = { provider: f.insurance_company, policyNumber: f.policy_number, endDate: normalizeDate(f.insurance_expiration ?? "") };
+    const vehicleIn = {
       vehicleYear: f.vehicle_year, vehicleMake: f.vehicle_make, vehicleModel: f.vehicle_model,
       vin: f.vehicle_vin?.length === 17 ? f.vehicle_vin : undefined,
-    }));
+    };
+    // [CG] the reader's own confidence for each field it filled in, under the form's field names
+    const reader: Record<string, string> = { provider: "insurance_company", policyNumber: "policy_number", endDate: "insurance_expiration",
+      vehicleYear: "vehicle_year", vehicleMake: "vehicle_make", vehicleModel: "vehicle_model", vin: "vehicle_vin" };
+    const filled = [...filledByScan(data, insuranceIn), ...filledByScan(vehicleData, vehicleIn)] as string[];
+    mark(Object.fromEntries(filled.map(key => [key, result.confidence?.[reader[key]] ?? 0.5])));  // no score at all = unsure
+    onChange(current => fillBlank(current, insuranceIn));
+    onVehicleChange(current => fillBlank(current, vehicleIn));
   };
 
   return (
     <div className="flex flex-col gap-6">
       <ScanPrompt
         title="Scan Proof of Insurance"
-        subtitle="Place your insurance card under the camera, then scan it."
+        subtitle="Put your insurance card, or your phone showing your insurance, in the scanner box."
         docType="insurance"
         scanned={insuranceScanned}
         onScan={handleInsuranceScan}
+        autoOpen
       />
       <div
         className="rounded-lg p-5 flex flex-col gap-5"
@@ -705,39 +796,39 @@ function Step3({
       >
         <p className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--muted-foreground)" }}>Vehicle Information</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
-          <Field label="Year" required>
+          <Field label="Year" required name="vehicleYear">
             <InputEl inputMode="numeric" placeholder="2019" value={vehicleData.vehicleYear} onChange={setVehicle("vehicleYear")} maxLength={4} />
           </Field>
-          <Field label="Make" required>
+          <Field label="Make" required name="vehicleMake">
             <InputEl choices={makes} maxLength={55} placeholder="Search or enter make" value={vehicleData.vehicleMake} onChange={setVehicle("vehicleMake")} />
           </Field>
-          <Field label="Model" required>
+          <Field label="Model" required name="vehicleModel">
             <InputEl choices={vehicleModels(vehicleData.vehicleMake)} maxLength={60} placeholder="Search or enter model" value={vehicleData.vehicleModel} onChange={setVehicle("vehicleModel")} />
           </Field>
         </div>
-        <Field label="VIN" required hint="17-character Vehicle Identification Number">
+        <Field label="VIN" required name="vin" hint="17 characters. It's on your insurance card and at the bottom of the windshield on the driver's side.">
           <InputEl placeholder="1HGBH41JXMN109186" value={vehicleData.vin} onChange={setVehicle("vin")} maxLength={17} />
         </Field>
-        <Field label="Current License Plate" required>
+        <Field label="Current License Plate" required name="licensePlate">
           <InputEl maxLength={12} placeholder="ABC-1234" value={vehicleData.licensePlate} onChange={setVehicle("licensePlate")} />
         </Field>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-        <Field label="Insurance Provider" required>
+        <Field label="Insurance Provider" required name="provider">
           <InputEl choices={providers} value={data.provider} onChange={set("provider")} placeholder="Search or enter provider" maxLength={90} />
         </Field>
-        <Field label="Policy Number" required>
+        <Field label="Policy Number" required name="policyNumber">
           <InputEl placeholder="POL-8821049-A" value={data.policyNumber} onChange={set("policyNumber")} />
         </Field>
       </div>
-      <Field label="Policy Holder Name" required>
+      <Field label="Policy Holder Name" required name="policyHolder">
         <InputEl maxLength={70} placeholder="Margaret Sullivan" value={data.policyHolder} onChange={set("policyHolder")} />
       </Field>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Field label="Coverage Start Date (optional)">
           <InputEl type="date" value={data.startDate} onChange={set("startDate")} />
         </Field>
-        <Field label="Policy End Date" required>
+        <Field label="Policy End Date" required name="endDate">
           <InputEl type="date" value={data.endDate} onChange={set("endDate")} />
         </Field>
       </div>
@@ -1051,13 +1142,29 @@ export default function App() {
   const [initials, setInitials] = useState("");
   const [printResult, setPrintResult] = useState<PrintStatus | null>(null);
   const [printNotice, setPrintNotice] = useState("");
+  const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] the printer never answered; the screen still moves on
   const [checkingSession, setCheckingSession] = useState(true);
+  const [staff, setStaff] = useState<StaffUser | null>(null);  // [CG] who is signed in, for the sign-out bar
+  const [signingOut, setSigningOut] = useState(false);
+  const [staffMessage, setStaffMessage] = useState("");
+  const [formError, setFormError] = useState("");  // [CG] shown on the page instead of a pop-up, which blocks the touchscreen
+  const [missing, setMissing] = useState("");  // [CG] the blank field Continue stopped on
+  const [scores, setScores] = useState<Record<string, number>>({});  // [CG] scan confidence per field
+  const confidence = {
+    scores, missing,
+    clear: (name: string) => {
+      setScores(current => { if (!(name in current)) return current; const next = { ...current }; delete next[name]; return next; });
+      setMissing(current => current === name ? "" : current);
+      setFormError("");
+    },
+    mark: (incoming: Record<string, number>) => setScores(current => ({ ...current, ...incoming })),
+  };
   useEffect(() => {
     const controller = new AbortController();
-    const expire = () => setAuthed(false);
+    const expire = () => { setAuthed(false); setStaff(null); };
     window.addEventListener("kiosk-session-expired", expire);
-    kioskFetch("/api/auth/session", { signal: controller.signal })
-      .then(response => { if (!controller.signal.aborted) setAuthed(response.ok); })
+    staffSession(controller.signal)
+      .then(user => { if (!controller.signal.aborted) { setAuthed(Boolean(user)); setStaff(user); } })
       .catch(() => {})
       .finally(() => { if (!controller.signal.aborted) setCheckingSession(false); });
     return () => {
@@ -1065,6 +1172,24 @@ export default function App() {
       window.removeEventListener("kiosk-session-expired", expire);
     };
   }, []);
+
+  // [CG] staff sign-out, brought back from the earlier compiled form. Not allowed mid-renewal, so a paid customer's
+  // receipt can't be lost
+  const handleSignOut = async () => {
+    if (sessionStorage.getItem("kiosk-payment-reference")) {
+      setStaffMessage("Complete the current payment and receipt, then start a new renewal before signing out.");
+      return;
+    }
+    setSigningOut(true); setStaffMessage("");
+    try {
+      await signOut();
+      setAuthed(false); setStaff(null);
+    } catch (error) {
+      setStaffMessage(error instanceof Error ? error.message : "Please try signing out again.");
+    } finally {
+      setSigningOut(false);
+    }
+  };
 
 
   const cardEntry = useRef<CardEntry | null>(null);
@@ -1074,8 +1199,9 @@ export default function App() {
   // no typed-card backup; a reader problem shows on the card reader step, with Retry connecting
 
   // monday.com crm record, shown on the success screen
-  const [crmStatus, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
-  const [crmMessage, setCrmMessage] = useState("");
+  // [CG] still tracked (a failed save is logged by the server), just no longer shown to the customer
+  const [, setCrmStatus] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [, setCrmMessage] = useState("");
   const crmSavedRef = useRef(false);  // so a print retry can never make a second crm record
   const crmPayloadRef = useRef<{ itemName: string; fields: Record<string, string | number> } | null>(null);  // kept so the retry button can resend it
 
@@ -1105,7 +1231,7 @@ export default function App() {
   const [printing, setPrinting] = useState(false);
   const [paid, setPaid] = useState<PaymentResult | null>(null);
   const showingPrint = submitted || (printing && Boolean(paid));
-  useEffect(() => { window.scrollTo(0, 0); }, [step, showingPrint]);
+  useEffect(() => { window.scrollTo(0, 0); setFormError(""); setMissing(""); }, [step, showingPrint]);
   const [paymentStatus, setPaymentStatus] = useState("");
   const printPending = useRef(false);
   const printReference = useRef(sessionStorage.getItem("kiosk-payment-reference") || "");
@@ -1114,6 +1240,9 @@ export default function App() {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const started = Date.now();
+    // [CG] if the printer never reports finished, stop waiting after 2 minutes: tell the customer to get staff and let the
+    // screen reset for the next customer, so one stuck print job can't freeze the kiosk
+    const giveUp = setTimeout(() => setPrintTimedOut(true), 120000);
     const poll = async () => {
       try {
         const result = await printStatus(printReference.current, controller.signal);
@@ -1130,7 +1259,7 @@ export default function App() {
       timer = setTimeout(poll, 1500);
     };
     void poll();
-    return () => { controller.abort(); clearTimeout(timer); };
+    return () => { controller.abort(); clearTimeout(timer); clearTimeout(giveUp); };
   }, [submitted, authed]);
 
   // builds what we send to monday.com. the server only forwards the fields listed in COLUMN_MAP (monday_service_CG.py)
@@ -1152,6 +1281,7 @@ export default function App() {
         city: personal.city,
         state: personal.state,
         zip: personal.zip,
+        county: personal.county,  // [CG] goes to the column set by MONDAY_COUNTY_COLUMN
         fullAddress: [personal.address, cityStateZip].filter(Boolean).join(", "),
         licenseNumber: license.licenseNumber,
         licensePlate: plate,
@@ -1191,16 +1321,15 @@ export default function App() {
   };
 
   // [BV] pay-then-print step; the payment and Monday.com calls inside it are [CG]
+  const [paymentError, setPaymentError] = useState("");  // [CG] on the page, not a pop-up
   const handlePrint = async () => {
     if (printPending.current) return;
     const error = renewalError(personal, license, insurance);
-    if (error || !initials) { window.alert(error || "Enter your initials before paying."); return; }
+    if (error || !initials) { setPaymentError(error || "Go back to Review and enter your initials before paying."); return; }
     printPending.current = true;
     setPrinting(true);
-    if (!printReference.current) {
-      const utc = new Date().toISOString().replace(/[-:.]/g, "");
-      printReference.current = `${utc}-RN-Kiosk-1-${crypto.randomUUID().replace(/-/g, "")}`;
-    }
+    setPaymentError("");
+    if (!printReference.current) printReference.current = transactionId();  // [CG] shorter, so it fits the receipt
     sessionStorage.setItem("kiosk-payment-reference", printReference.current);
     let confirmed = paid;
     try {
@@ -1208,12 +1337,13 @@ export default function App() {
         license_plate: license.licensePlate, vehicle_year: license.vehicleYear,
         vehicle_make: license.vehicleMake, vehicle_model: license.vehicleModel,
         vin: license.vin, confirmation_number: printReference.current,
-        receipt_email: personal.email.trim() };  // Stripe emails its receipt to this when the payment is captured
+        receipt_email: personal.email.trim(),  // Stripe emails its receipt to this when the payment is captured
+        security_event_id: crypto.randomUUID() };  // [CG] new for each Pay attempt, so each one gets its own security photo (lost in the Nov 17 rebuild)
       if (!paid && !cardEntry.current) throw new Error("Wait for the card reader to connect.");
       confirmed = paid || await cardEntry.current!.pay(payload, setPaymentStatus);
       if (confirmed.status !== "succeeded") throw new Error("Payment is not confirmed. Retry to check its status.");
       setPaid(confirmed);
-      setPaymentStatus("Test payment confirmed. Sending to printer…");
+      setPaymentStatus("Payment approved. Sending to the printer…");
       const { address, city, state, zip, county, phone, email } = personal;
       setPrintResult(await submitPrint({
         ...payload,
@@ -1226,8 +1356,8 @@ export default function App() {
       if (!crmSavedRef.current) void saveToCrm(buildCrmPayload(payload.confirmation_number, confirmed.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Payment or printing failed. Your form is still available.";
-      setPaymentStatus(confirmed ? "Test payment confirmed. Retry printing without paying again." : "Payment not confirmed. Retry to check the same transaction.");
-      window.alert((confirmed ? "Test payment succeeded; do not pay again. " : "") + message);
+      setPaymentStatus("");
+      setPaymentError((confirmed?.status === "succeeded" ? "Your payment went through, so do not pay again. " : "") + message);
     } finally {
       printPending.current = false;
       setPrinting(false);
@@ -1235,20 +1365,33 @@ export default function App() {
   };
 
   const stepTitles: Record<Step, string> = {
-    1: "Personal Information",
-    2: "Driver's License",
+    1: "Scan Your Driver's License",
+    2: "Driver's License Details",
     3: "Insurance & Vehicle Details",
     4: "Review & Confirm",
     5: "Payment",
   };
 
+  // [CG] clearer prompts: what to do on this screen, in the order they do it
   const stepSubtitles: Record<Step, string> = {
-    1: "Scan your driver’s license and enter your contact information.",
-    2: "Check your driver’s license details.",
-    3: "Scan your insurance card and check your vehicle details.",
-    4: "Review all information before proceeding to payment.",
-    5: "Complete your $114.25 renewal payment securely.",
+    1: "Scan your driver’s license, then type your email and phone number.",
+    2: "Check that these match your driver’s license. Tap a field to fix it.",
+    3: "Scan your insurance card, then check your vehicle and insurance details.",
+    4: "Check everything one last time, then sign with your initials at the bottom.",
+    5: "Pay $114.25 on the card reader. Your sticker and receipt print right after.",
   };
+
+  // [CG] the sponsor asked for payment to start on its own on the payment step: once the reader is connected, the
+  // payment goes to the reader without a Pay press. Only the first time per visit to the step, so a decline or a Cancel
+  // waits for the customer to press Try Again instead of looping on the reader
+  const autoPaid = useRef(false);
+  useEffect(() => {
+    if (step !== 5) { autoPaid.current = false; return; }
+    if (paymentReady && !paid && !printing && !autoPaid.current) {
+      autoPaid.current = true;
+      void handlePrint();
+    }
+  });  // eslint-disable-line react-hooks/exhaustive-deps -- runs after each render, acts once per visit
 
   if (checkingSession) return <p role="status">Opening kiosk…</p>;
   if (!authed) return <AdminLogin onLogin={() => setAuthed(true)} />;
@@ -1256,7 +1399,7 @@ export default function App() {
   if (showingPrint) {
     const confNum = printReference.current;
     const printComplete = printResult?.state === "completed";
-    const printStopped = ["aborted", "cancelled", "unknown", "failed", "uncertain"].includes(printResult?.state ?? "");
+    const printStopped = printTimedOut || ["aborted", "cancelled", "unknown", "failed", "uncertain"].includes(printResult?.state ?? "");
     const emailState = printResult?.email_state;
     return (
       <div className="kiosk-ui min-h-screen flex flex-col" style={{ backgroundColor: "var(--background)" }}>
@@ -1359,9 +1502,8 @@ export default function App() {
                   { label: "Registrant", value: `${personal.firstName} ${personal.lastName}` },
                   { label: "Vehicle", value: `${license.vehicleYear} ${license.vehicleMake} ${license.vehicleModel}` },
                   { label: "Plate", value: license.licensePlate },
-                  { label: "Amount Paid", value: "$114.25 (Stripe test)" },
-                  { label: "Stripe Payment", value: paid?.id || "—" },
-                  { label: "Payment method", value: "Stripe Terminal" },
+                  { label: "Amount Paid", value: "$114.25" },
+                  { label: "Payment method", value: "Card reader" },
                   { label: "Transaction ID", value: confNum },
                 ].map((r) => (
                   <div key={r.label} className="flex justify-between items-center py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -1372,33 +1514,44 @@ export default function App() {
               </div>
             </div>
 
-            {/* monday.com crm status */}
-            {crmStatus !== "idle" && (
-              <div className="w-full flex flex-col gap-2">
-                <div className="flex justify-between items-center rounded-lg px-4 py-3 text-sm" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)" }}>
-                  <span style={{ color: "var(--muted-foreground)" }}>CRM record (Monday.com)</span>
-                  <span className="font-semibold" style={{ color: crmStatus === "saved" ? "#3a7d44" : crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>
-                    {crmStatus === "saving" ? "Saving..." : crmStatus === "saved" ? "Saved ✓" : "Not saved"}
-                  </span>
-                </div>
-                {crmMessage && <p className="text-xs px-1" style={{ color: crmStatus === "failed" ? "#b42318" : "var(--muted-foreground)" }}>{crmMessage}</p>}
-                {crmStatus === "failed" && (
-                  <button type="button" onClick={() => { if (crmPayloadRef.current) void saveToCrm(crmPayloadRef.current); }} className="self-start px-4 py-2 rounded-md text-xs font-semibold" style={{ border: "1px solid var(--border)", backgroundColor: "var(--card)", color: "var(--primary)" }}>
-                    Retry saving to CRM
-                  </button>
-                )}
-              </div>
-            )}
+            {/* [CG] the Monday.com (CRM) status used to show here. The sponsor asked for it to go: customers don't need it.
+                A record that couldn't be saved is still written to runtime/kiosk-problems.log ("MONDAY NOT SAVED") for staff */}
 
-            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
+            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
           </div>
         </div>
       </div>
     );
   }
 
+  // [CG] Continue checks this step's fields first (the sponsor saw customers skip ahead with blanks). It stops at the first
+  // blank one, outlines it in red and scrolls it into view
+  const goNext = () => {
+    const current = step as FormStep;
+    const error = stepError(current, personal, license, insurance);
+    if (error) {
+      const blank = firstBlank(current, personal, license, insurance);
+      setFormError(error);
+      setMissing(blank);
+      requestAnimationFrame(() => document.querySelector(`[data-field="${blank}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+      return;
+    }
+    setStep((s) => (s + 1) as Step);
+  };
+
   return (
+    <ScanConfidence.Provider value={confidence}>
     <div className="kiosk-ui min-h-screen" style={{ backgroundColor: "var(--background)" }}>
+      {/* [CG] staff bar with sign-out, from the earlier compiled form */}
+      {staff && (
+        <div className="px-6 py-2 flex flex-wrap items-center justify-end gap-4 text-sm" style={{ background: "var(--primary)", color: "white" }}>
+          <span>{staff.username}{staff.mode === "master" ? " · Master administrator" : " · Staff"}</span>
+          <button type="button" disabled={signingOut} onClick={() => void handleSignOut()} className="underline">
+            {signingOut ? "Signing out…" : "Sign out"}
+          </button>
+          {staffMessage && <p role="alert">{staffMessage}</p>}
+        </div>
+      )}
       {/* Header */}
       <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
@@ -1419,7 +1572,7 @@ export default function App() {
 
         <div className="mb-8">
           <h1 className="text-3xl leading-tight mb-1">{stepTitles[step]}</h1>
-          <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>{stepSubtitles[step]}</p>
+          <p className="text-base" style={{ color: "var(--muted-foreground)" }}>{stepSubtitles[step]}</p>
         </div>
 
         <div
@@ -1440,8 +1593,14 @@ export default function App() {
                 onChange={event => setInitials(event.target.value.replace(/[^a-z]/gi, "").toUpperCase())} />
             </label>
           </section>}
-        {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} />}
+        {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} error={paymentError} />}
         </div>
+
+        {formError && (
+          <div role="alert" className="rounded-lg px-4 py-3 mb-4 text-base font-semibold" style={{ backgroundColor: "#fdecea", border: "1px solid #f5c2bd", color: "#b42318" }}>
+            {formError}
+          </div>
+        )}
 
         <div className="flex items-center justify-between">
           {step > 1 ? (
@@ -1462,7 +1621,7 @@ export default function App() {
 
           {step < 4 ? (
             <button
-              onClick={() => setStep((s) => (s + 1) as Step)}
+              onClick={goNext}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
               style={{ backgroundColor: "var(--primary)", color: "var(--primary-foreground)" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#142e4a"; }}
@@ -1477,7 +1636,7 @@ export default function App() {
             <button
               onClick={() => {
                 const error = renewalError(personal, license, insurance);
-                if (error || !initials) { window.alert(error || "Enter your initials before continuing."); return; }
+                if (error || !initials) { setFormError(error || "Enter your initials in the signature box before continuing."); return; }  // [CG] was a pop-up
                 setStep(5);
               }}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
@@ -1499,7 +1658,7 @@ export default function App() {
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#2d6636"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#3a7d44"; }}
             >
-              {printing ? (paid ? "Sending to printer…" : "Processing payment…") : paid ? "Retry Printing" : "Pay $114.25"}
+              {printing ? (paid ? "Sending to printer…" : "Waiting for the card reader…") : paid ? "Retry Printing" : paymentError ? "Try Again" : "Pay $114.25"}
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M2 7h10M8 3l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -1512,5 +1671,6 @@ export default function App() {
         </p>
       </main>
     </div>
+    </ScanConfidence.Provider>
   );
 }

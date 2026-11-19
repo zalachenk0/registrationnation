@@ -1,12 +1,13 @@
-import { kioskFetch } from "./integration_BV";
 // ============================================================================
 // File:         payment_CG.ts
 // Written by:   CG (Cristian Gonzalez)
 // What it does: Browser side payment helpers: calls to our payment server and
 //               the shared payment types. Card reader only (no typed card).
-// Team-written: All logic written by CG (Cristian Gonzalez).
+// Team-written: All logic written by CG (Cristian Gonzalez), except the lines
+//               tagged [BV] (Blas Vargas, Nov 17).
 // Third-party:  None (the Stripe calls happen on the server).
 // ============================================================================
+import { kioskFetch } from "./integration_BV";  // [BV] adds the kiosk header and the signed-out check to every call
 export const PAYMENT_AMOUNT = 11425;
 export const PAYMENT_LABEL = "$114.25";
 export interface TerminalSettings { enabled: boolean; simulated: boolean; location: string | null; problem: string }
@@ -23,7 +24,7 @@ export async function api(path: string, payload?: Record<string, string>): Promi
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
   try {
-    const response = await kioskFetch(`/api/payment/${path}`, {
+    const response = await kioskFetch(`/api/payment/${path}`, {  // [BV] was fetch
       method: path === "config" ? "GET" : "POST",
       headers: { "Content-Type": "application/json", "X-Kiosk-Payment": "1" },
       body: payload ? JSON.stringify(payload) : undefined, signal: controller.signal,
