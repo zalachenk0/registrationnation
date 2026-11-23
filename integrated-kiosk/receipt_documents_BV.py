@@ -12,6 +12,7 @@
 """Two-page registration sample and populated original TTT receipt."""
 from __future__ import annotations
 
+import base64  # [SL]
 import io
 import os
 import re  # [CG]
@@ -24,6 +25,7 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.lib.colors import HexColor, black, white
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader  # [SL] signature image
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph
 
@@ -148,7 +150,13 @@ def build_documents(data, payment=None, *, today=None):
     ):
         if value:
             _box(pdf, value, 125.45, baseline, width, 18, 7)
-    if data.get('initials'):
+    if data.get('signature'):  # [SL] drawn signature sits on the same line the initials used
+        pdf.setStrokeColor(black)
+        pdf.line(345, 205, 476, 205)
+        # fits between the table's bottom rule (~224) and the paragraph below; white is see-through so nothing is covered
+        pdf.drawImage(ImageReader(io.BytesIO(base64.b64decode(data['signature']))), 345, 199, width=131, height=23,
+                      preserveAspectRatio=True, anchor='c', mask=[235, 255, 235, 255, 235, 255])
+    elif data.get('initials'):
         pdf.setStrokeColor(black)
         pdf.line(345, 205, 476, 205)
         _box(pdf, data['initials'], 351, 208, 120, 16, 9, True)

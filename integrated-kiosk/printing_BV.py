@@ -9,6 +9,8 @@
 # ============================================================================
 """PDF mock sticker + receipt, with idempotent submission to local CUPS."""
 from __future__ import annotations
+import base64
+import binascii
 import hashlib
 import io
 import json
@@ -68,7 +70,29 @@ def document_data(data):
         if not isinstance(initials, str) or not re.fullmatch(r'[A-Z]{1,8}', initials):
             raise ValueError('Enter valid customer initials.')
         result['initials'] = initials
+    signature = data.get('signature')  # [SL] finger signature from the review step, a PNG data URL
+    if signature is not None:
+        result['signature'] = signature_base64(signature)
     return result
+
+
+SIGNATURE_PREFIX = 'data:image/png;base64,'
+SIGNATURE_MAX_BYTES = 500_000
+
+
+def signature_base64(signature):
+    """[SL] Check the drawn signature is a real, reasonably sized PNG; return its base64 part."""
+    if (not isinstance(signature, str) or not signature.startswith(SIGNATURE_PREFIX)
+            or len(signature) > len(SIGNATURE_PREFIX) + SIGNATURE_MAX_BYTES * 4 // 3 + 4):
+        raise ValueError('The signature is missing or invalid. Sign again before printing.')
+    encoded = signature[len(SIGNATURE_PREFIX):]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError('The signature is missing or invalid. Sign again before printing.') from exc
+    if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        raise ValueError('The signature is missing or invalid. Sign again before printing.')
+    return encoded
 
 
 def printer_status():
