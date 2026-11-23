@@ -9,7 +9,7 @@
 // Third-party:  React; Stripe (server-driven reader), through terminal_CG.ts.
 // ============================================================================
 import { useEffect, useState, type MutableRefObject } from "react";
-import { PAYMENT_LABEL, type CardEntry } from "./payment_CG";
+import { PAYMENT_LABEL, CHARGES, dollars, type CardEntry } from "./payment_CG";
 import { mountTerminalEntry } from "./terminal_CG";
 
 // the S700 card reader panel. [CG] This is the only way to pay: there's no typed-card backup, because the kiosk has no
@@ -80,9 +80,19 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy, er
         <p className="text-base mt-2" style={{ color: tone.text }}>{detail}</p>
       </div>
     </div>
-    <div className="rounded-lg p-5 flex justify-between items-center" style={{ border: "1px solid var(--border)", backgroundColor: "var(--secondary)" }}>
-      <span className="font-semibold">Registration renewal total</span>
-      <span className="text-xl font-bold">{PAYMENT_LABEL}</span>
+    {/* summary of charges, same rows as the printed receipt, adding up to the total on the reader */}
+    <div data-charges className="rounded-lg p-5 flex flex-col gap-2" style={{ border: "1px solid var(--border)", backgroundColor: "var(--secondary)" }}>
+      <p className="font-semibold mb-1">Summary of charges</p>
+      {CHARGES.map(charge => (
+        <div key={charge.label} className="flex justify-between items-center text-base">
+          <span>{charge.label}</span>
+          <span className="tabular-nums">{dollars(charge.cents)}</span>
+        </div>
+      ))}
+      <div className="flex justify-between items-center pt-2 mt-1" style={{ borderTop: "1px solid var(--border)" }}>
+        <span className="font-semibold">Total due</span>
+        <span className="text-xl font-bold tabular-nums">{PAYMENT_LABEL}</span>
+      </div>
     </div>
     {!paid && <p className="flex items-center gap-2 text-sm">
       <span aria-hidden style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", backgroundColor: connected ? "#3a7d44" : error ? "#b42318" : "#d4a017" }} />

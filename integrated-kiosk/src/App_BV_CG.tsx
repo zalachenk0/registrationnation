@@ -1383,7 +1383,7 @@ export default function App() {
     1: "Scan your driver’s license, then type your email and phone number.",
     2: "Check that these match your driver’s license. Tap a field to fix it.",
     3: "Scan your insurance card, then check your vehicle and insurance details.",
-    4: "Check everything one last time, then sign with your initials at the bottom.",
+    4: "Check everything one last time, then enter your initials at the bottom.",
     5: "Pay $114.25 on the card reader. Your sticker and receipt print right after.",
   };
 
@@ -1582,11 +1582,11 @@ export default function App() {
           {step === 3 && <Step3 data={insurance} onChange={setInsurance} vehicleData={license} onVehicleChange={setLicense} />}
           {step === 4 && <Step4 personal={personal} license={license} insurance={insurance} onPersonalChange={setPersonal} onLicenseChange={setLicense} onInsuranceChange={setInsurance} />}
           {step === 4 && <section className="mt-8 border-t pt-6 space-y-3">
-            <h2 className="text-xl">Customer signature</h2>
-            <p>By signing I confirm that all information with this transaction is true and correct. I understand, I have until 12pm the next business day to make any corrections at no charge. After 12pm, I will be responsible for all applicable charges for any changes. I also understand that if this transaction is rejected by the county for any reason, a rejection fee may apply. I will be notified of the rejection and given the opportunity to resolve any issues; however, any fees assessed as a result of the rejection are my responsibility.</p>
+            <h2 className="text-xl">Customer initials</h2>{/* [CG] was "signature" */}
+            <p>By initialing I confirm that all information with this transaction is true and correct. I understand, I have until 12pm the next business day to make any corrections at no charge. After 12pm, I will be responsible for all applicable charges for any changes. I also understand that if this transaction is rejected by the county for any reason, a rejection fee may apply. I will be notified of the rejection and given the opportunity to resolve any issues; however, any fees assessed as a result of the rejection are my responsibility.</p>
             <p>I also understand that this information is used to ensure your transaction goes well. We will use this information to contact you if any issues arise before the transaction is submitted to the State of Texas. We may use this information to remind you of your annual vehicle registration.</p>
             <label className="block max-w-xs">{/* [CG] */}
-              Enter your initials to sign
+              Enter your initials
               <InputEl value={initials} autoCapitalize="characters" maxLength={8} required
                 onChange={event => { setInitials(event.target.value.replace(/[^a-z]/gi, "").toUpperCase()); setFormError(""); }} />
             </label>

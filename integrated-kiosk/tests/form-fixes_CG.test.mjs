@@ -265,7 +265,7 @@ const bundle = readFileSync(new URL('../dist/' + bundleName, import.meta.url), '
 test('dist/ is built from today\'s src/ and has everything the Nov 17 build lost', () => {
   assert.ok(existsSync(new URL('../dist/' + cssName, import.meta.url)));
   for (const piece of ['/api/camera/license-front', '/api/security/front-capture', '/api/auth/logout', 'security_event_id',
-    'touch-keyboard', 'Scan the front of your license', 'Enter your initials to sign', 'Sign out', 'reader_start', 'capture_intent']) {
+    'touch-keyboard', 'Scan the front of your license', 'Enter your initials', 'Sign out', 'reader_start', 'capture_intent']) {
     assert.ok(bundle.includes(piece), 'missing from ' + bundleName + ': ' + piece);
   }
   for (const gone of ['CRM record (Monday.com)', 'Retry saving to CRM', 'Open Scanner<']) {

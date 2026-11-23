@@ -10,6 +10,14 @@
 import { kioskFetch } from "./integration_BV";  // [BV] adds the kiosk header and the signed-out check to every call
 export const PAYMENT_AMOUNT = 11425;
 export const PAYMENT_LABEL = "$114.25";
+// the same charges the printed receipt lists (FEES in receipt_documents_BV.py), in cents. they add up to PAYMENT_AMOUNT;
+// a test checks both of those so the screen and the receipt can't disagree
+export const CHARGES: readonly { label: string; cents: number }[] = [
+  { label: "County Fee", cents: 8725 },
+  { label: "TTT Related Transaction Charge", cents: 2164 },
+  { label: "Other Related Charges", cents: 536 },
+];
+export const dollars = (cents: number) => "$" + (cents / 100).toFixed(2);
 export interface TerminalSettings { enabled: boolean; simulated: boolean; location: string | null; problem: string }
 export interface ServerReaderSettings { enabled: boolean; simulated: boolean; problem: string }
 export interface PaymentConfig { amount: number; currency: string; testMode: boolean; terminal?: TerminalSettings; serverReader?: ServerReaderSettings }

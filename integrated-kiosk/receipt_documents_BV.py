@@ -55,6 +55,28 @@ def _box(pdf, value, x, baseline, width, height=24, size=10, bold=False):
 FEES = (8725, 2164, 536)
 
 
+# [CG] the TTT template says "Customer Signature" and "By signing", but the kiosk takes typed initials. white boxes go
+# over those two spots and the initials wording goes on top, same size and place (Helvetica, since the template's Noto
+# Sans is only embedded as a subset)
+COVER_HEADING = (226, 203.5, 116, 14)  # x, y, width, height over "Customer Signature"
+COVER_FIRST_LINE = (226, 190.5, 302, 12.5)  # over "By signing I confirm ... transaction is"
+
+
+def initials_wording(pdf):
+    pdf.setFillColor(white)
+    for x, y, width, height in (COVER_HEADING, COVER_FIRST_LINE):
+        pdf.rect(x, y, width, height, stroke=0, fill=1)
+    pdf.setFillColor(black)
+    pdf.setFont('Helvetica-Bold', 11)
+    pdf.drawString(228.4, 207.6, 'Customer Initials')
+    line = 'By initialing I confirm that all information with this transaction is'
+    text = pdf.beginText(228.4, 193.7)
+    text.setFont('Helvetica', 10)
+    text.setCharSpace((296 - pdf.stringWidth(line, 'Helvetica', 10)) / (len(line) - 1))  # stretched to end where the template's line did
+    text.textOut(line)
+    pdf.drawText(text)
+
+
 def build_documents(data, payment=None, *, today=None):
     # The public printing wrapper validates data; keep this internal API reusable for previews/tests.
     today = today or datetime.now(ZoneInfo(os.getenv('KIOSK_TIMEZONE', 'America/Chicago'))).date()
@@ -166,6 +188,7 @@ def build_documents(data, payment=None, *, today=None):
         pdf.setStrokeColor(black)
         pdf.line(345, 205, 476, 205)
         _box(pdf, data['initials'], 351, 208, 120, 16, 9, True)
+        initials_wording(pdf)  # [CG]
     _box(pdf, data['license_plate'].upper(), 389, 545.25, 148, 20, 10)
     _box(pdf, data['vin'].upper(), 355, 521.25, 182, 20, 9)
 

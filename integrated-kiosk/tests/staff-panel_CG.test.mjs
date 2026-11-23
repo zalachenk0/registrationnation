@@ -4,7 +4,8 @@
 // What it does: Tests the Nov 23 changes: the sign-out bar is gone, the hidden
 //               staff panel only opens with Ctrl+Shift+L from a real keyboard,
 //               a print that fails after payment shows its reason instead of
-//               "printing", and Review is back to typed initials.
+//               "printing", Review is back to typed initials, and the payment
+//               step lists the same charges as the receipt.
 // Team-written: All logic written by CG (Cristian Gonzalez).
 // Third-party:  Node's built-in test runner; TypeScript (to load src/ files);
 //               React and jsdom (a browser page in Node).
@@ -23,6 +24,10 @@ globalThis.__spReact = React;
 const reactLine = /import \{ ([^}]+) \} from "react";/;
 const withReact = text => text.replace(reactLine, (_, names) => `const React = globalThis.__spReact; const { ${names.replace(/type \w+,?\s*/g, '')} } = React;`);
 
+// payment_CG.ts imports integration_BV.ts, which a data: URL can't follow, so its constants are lifted out as-is
+const paymentSource = source('payment_CG.ts');
+const paymentStub = ['PAYMENT_LABEL', 'CHARGES', 'dollars']
+  .map(name => paymentSource.match(new RegExp(`export const ${name}[\\s\\S]*?;$`, 'm'))[0].replace('export ', '')).join('\n');
 const { StaffPanel, isStaffShortcut } = await load(transpile(withReact(source('StaffPanel_CG.tsx'))));
 const { submitPrint } = await load(transpile(source('integration_BV.ts')));
 const originalFetch = globalThis.fetch;
@@ -135,7 +140,7 @@ test('a print error page that is not JSON still gives the screen a reason it can
 test('when the card was charged but printing failed, the payment panel says so instead of "printing"', async t => {
   const p = await page(t);
   const text = withReact(source('TerminalPayment_CG.tsx'))
-    .replace(/import \{ PAYMENT_LABEL[^;]+;/, 'const PAYMENT_LABEL = "$114.25";')
+    .replace(/import \{ PAYMENT_LABEL[^;]+;/, paymentStub)
     .replace(/import \{ mountTerminalEntry \}[^;]+;/, 'const mountTerminalEntry = () => new Promise(() => {});');
   const { TerminalPayment } = await load(transpile(text));
   const show = props => act(async () => p.root.render(React.createElement(TerminalPayment,
@@ -156,12 +161,37 @@ test('when the card was charged but printing failed, the payment panel says so i
 test('Review asks for typed initials and the print sends initials, not a signature picture', () => {
   const app = source('App_BV_CG.tsx');
   assert.ok(!app.includes('SignaturePad'), 'the signature pad is off the form');
-  assert.ok(app.includes('Enter your initials to sign'));
+  assert.ok(app.includes('Enter your initials'));
+  assert.ok(app.includes('Customer initials') && app.includes('By initialing I confirm') && !app.includes('Customer signature') && !app.includes('By signing'));
   assert.match(app, /setInitials\(event\.target\.value\.replace\(\/\[\^a-z\]\/gi, ""\)\.toUpperCase\(\)\)/, 'letters only, upper case, like printing_BV.py wants');
   assert.match(app, /maxLength=\{8\}/);
   assert.match(app, /\n\s+initials,\n/, 'initials go in the print request');
   assert.ok(!/\n\s+signature,\n/.test(app), 'no signature in the print request');
   const index = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');
   const bundle = readFileSync(new URL('../dist/' + index.match(/src="\/(assets\/index-[^"]+\.js)"/)[1], import.meta.url), 'utf8');
-  assert.ok(bundle.includes('Enter your initials to sign') && !bundle.includes('Sign here with your finger'));
+  assert.ok(bundle.includes('By initialing I confirm') && !bundle.includes('By signing') && !bundle.includes('Sign here with your finger'));
+});
+
+// ---- summary of charges on the payment step ----
+
+test('the payment step charges match the receipt\'s FEES and add up to what the reader charges', () => {
+  const charges = paymentSource.match(/cents: (\d+)/g).map(text => Number(text.split(' ')[1]));
+  const receipt = readFileSync(new URL('../receipt_documents_BV.py', import.meta.url), 'utf8');
+  const fees = receipt.match(/^FEES = \(([\d, ]+)\)/m)[1].split(',').map(Number);
+  assert.deepEqual(charges, fees, 'same charges, same order as the printed receipt');
+  assert.equal(charges.reduce((a, b) => a + b, 0), Number(paymentSource.match(/PAYMENT_AMOUNT = (\d+)/)[1]));
+  assert.ok(paymentSource.includes('PAYMENT_LABEL = "$114.25"'));
+});
+
+test('the payment panel lists each charge with its amount, then the total', async t => {
+  const p = await page(t);
+  const { TerminalPayment } = await load(transpile(withReact(source('TerminalPayment_CG.tsx'))
+    .replace(/import \{ PAYMENT_LABEL[^;]+;/, paymentStub)
+    .replace(/import \{ mountTerminalEntry \}[^;]+;/, 'const mountTerminalEntry = () => new Promise(() => {});')));
+  await act(async () => p.root.render(React.createElement(TerminalPayment,
+    { controllerRef: { current: null }, onReady: () => {}, status: '', busy: false, error: '', paid: false })));
+  const rows = [...document.querySelectorAll('[data-charges] > div')].map(row => [...row.children].map(cell => cell.textContent));
+  assert.deepEqual(rows, [['County Fee', '$87.25'], ['TTT Related Transaction Charge', '$21.64'],
+    ['Other Related Charges', '$5.36'], ['Total due', '$114.25']]);
+  assert.match(document.querySelector('[data-charges]').textContent, /^Summary of charges/);
 });
