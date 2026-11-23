@@ -19,6 +19,8 @@ import { PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG
 import { TerminalPayment } from "./TerminalPayment_CG";
 import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
+import SignaturePad from "./SignaturePad_SL";  // [SL] finger signature on the review step
+import StartScreen from "./StartScreen_SL";  // [SL] welcome screen before each renewal
 import { displayDate, normalizeDate, renewalError, stepError, firstBlank, type FormStep } from "./renewal_BV";
 import { transactionId } from "./transaction_CG"; // [CG]
 import { counties, providers, vehicleModels, makes } from "./renewalOptions_BV";
@@ -300,8 +302,9 @@ function Step1({
   return (
     <div className="flex flex-col gap-6">
       <ScanPrompt
-        title="Scan Your Driver's License"
-        subtitle="Put your driver’s license in the scanner box. The camera will take a photo of the front, then read the barcode on the back."
+        title="Place your driver’s license in the scanner"
+        subtitle="Lay it flat with your photo facing up."
+        hint="Tap “I’m ready” to open the camera."
         docType="license"
         scanned={scanned}
         onScan={handleScan}
@@ -444,104 +447,105 @@ function CameraModal({
 
   const [insuranceFormat, setInsuranceFormat] = useState<"paper" | "phone">("paper");
   const shape = docType === "license" ? "license" : insuranceFormat;
+  // [SL] simpler wording to match the new scan screens; same two license shots and same insurance formats
   const guides = {
     license: frontSaved ? {  // [CG] front/back wording for the two-step license scan
-      title: "Now Flip Your License Over",
-      subtitle: "Front photo saved. Turn your license over so the barcode on the back faces up.",
-      position: "Step 2 of 2 · Back side", label: "Keep your whole license visible",
-      detail: "Keep the full barcode visible",
-      tip: "Center the license beneath the camera. Keep all four corners visible and hold it still.",
+      title: "Flip your license over",
+      instruction: "Place the barcode side facing up.",
+      detail: "Keep the full barcode in view.",
+      action: "Scan license",
     } : {
-      title: "Photograph the Front of Your License",
-      subtitle: "Place your license in the box with the photo side facing up, long edge left to right.",
-      position: "Step 1 of 2 · Front side", label: "Keep your whole license visible",
-      detail: "Keep your photo and all front-side details visible",
-      tip: "Center the license beneath the camera. Keep all four corners visible and hold it still.",
+      title: "Scan the front of your license",
+      instruction: "Place it flat with your photo facing up.",
+      detail: "Keep all four corners in view.",
+      action: "Take front photo",
     },
     paper: {
-      title: "Position Your Insurance Form",
-      subtitle: "Place your letter-size form under the camera, turned sideways.",
-      position: "Landscape · 8½ × 11 in paper", label: "Keep the whole page visible",
-      detail: "Keep every edge visible",
-      tip: "Lay the page flat. Keep the text clear, with no folds, shadows or glare.",
+      title: "Scan your insurance",
+      instruction: "Lay your paper flat and sideways, details facing up.",
+      detail: "Keep the whole page in view.",
+      action: "Scan insurance",
     },
     phone: {
-      title: "Position Your Insurance Screen",
-      subtitle: "Rotate your phone sideways and open your proof of insurance.",
-      position: "Landscape · Phone screen", label: "Keep your whole phone screen visible",
-      detail: "Keep the insurance details visible",
-      tip: "Increase screen brightness and keep the display awake. Tilt slightly if there is glare.",
+      title: "Scan your insurance",
+      instruction: "Open your insurance. Turn your phone sideways.",
+      detail: "Show all details. Keep the screen bright and on.",
+      action: "Scan insurance",
     },
   };
   const guide = guides[shape];
+  const panel = "#121a24";
+  const control = "#1f2a36";
+  const controlBorder = "#3b4756";
 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="camera-guide-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ backgroundColor: "rgba(0,0,0,0.82)", backdropFilter: "blur(4px)" }}>
-      <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-xl p-6 flex flex-col gap-4"
-        style={{ backgroundColor: "#111820", color: "#fff" }}>
-        <div className="flex items-start justify-between gap-4">
+      style={{ backgroundColor: "rgba(28,36,48,0.9)", backdropFilter: "blur(4px)" }}>
+      <div className="w-full max-w-2xl max-h-[94dvh] overflow-y-auto rounded-3xl px-8 py-8 flex flex-col gap-6"
+        style={{ backgroundColor: panel, color: "#fff" }}>
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <p id="camera-guide-title" className="font-semibold text-xl">{guide.title}</p>
-            <p className="text-sm mt-2 leading-relaxed" style={{ color: "#bcc6d2" }}>{guide.subtitle}</p>
+            {docType === "license" && frontSaved && (
+              <p className="text-sm font-semibold mb-1" style={{ color: "#8fd19e" }}>Front photo saved</p>
+            )}
+            <p id="camera-guide-title" className="font-bold text-4xl leading-tight">{guide.title}</p>
           </div>
           <button aria-label="Close scanner" onClick={handleClose}
-            className="w-10 h-10 shrink-0 rounded-full flex items-center justify-center"
-            style={{ backgroundColor: "#202b37", border: "1px solid #3e4855", color: "#fff" }}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            className="w-14 h-14 shrink-0 rounded-full flex items-center justify-center"
+            style={{ backgroundColor: control, border: `1.5px solid ${controlBorder}`, color: "#fff" }}>
+            <svg width="20" height="20" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
           </button>
         </div>
 
         {docType === "insurance" && (
-          <div className="flex gap-2" role="group" aria-label="Insurance document format">
-            {(["paper", "phone"] as const).map(format => (
-              <button key={format} type="button" aria-pressed={insuranceFormat === format}
-                onClick={() => setInsuranceFormat(format)} className="flex-1 rounded-lg px-3 py-3 text-sm font-medium"
-                style={{ border: `1px solid ${insuranceFormat === format ? "var(--accent)" : "#465260"}`,
-                  color: insuranceFormat === format ? "#fff" : "#cbd4df",
-                  backgroundColor: insuranceFormat === format ? "#30261f" : "#202b37" }}>
-                {format === "paper" ? "Paper form" : "Phone screen"}
-              </button>
-            ))}
+          <div className="flex gap-3" role="group" aria-label="Insurance document format">
+            {(["paper", "phone"] as const).map(format => {
+              const on = insuranceFormat === format;
+              return (
+                <button key={format} type="button" aria-pressed={on}
+                  onClick={() => setInsuranceFormat(format)} className="flex-1 rounded-xl px-3 py-4 text-xl font-medium"
+                  style={{ border: `1.5px solid ${on ? "var(--accent)" : controlBorder}`,
+                    color: on ? "#fff" : "#b9c4d0",
+                    backgroundColor: on ? "#3a2a1f" : control }}>
+                  {format === "paper" ? "Paper or card" : "Phone"}
+                </button>
+              );
+            })}
           </div>
         )}
 
-        <p className="text-xs uppercase tracking-widest text-center mt-1" style={{ color: "#bdc7d3" }}>{guide.position}</p>
-        <div className="relative shrink-0" style={{ aspectRatio: "16/9", backgroundColor: "#090e15" }}>
+        <p className="text-xl text-center">{guide.instruction}</p>
+
+        <div className="relative shrink-0 overflow-hidden" style={{ aspectRatio: "16/9", backgroundColor: "#3a4653" }}>
           {camError || !frameUrl ? (
-            <div role="status" className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm" style={{ color: "#cbd4df" }}>
-              {camError || "Starting the Pi camera…"}
+            <div role="status" className="absolute inset-0 flex items-center justify-center p-6 text-center text-lg" style={{ color: "#dbe2ea" }}>
+              {camError || "Starting the camera…"}
             </div>
           ) : (
-            <img src={frameUrl} alt="Live Arducam preview" className="absolute inset-0 w-full h-full object-contain" />
+            <img src={frameUrl} alt="Live camera preview" className="absolute inset-0 w-full h-full object-contain" />
           )}
         </div>
-        <div className="text-center">
-          <p className="text-base font-medium">{guide.label}</p>
-          <p className="text-xs mt-1" style={{ color: "#a6b4c4" }}>{guide.detail}</p>
-          <p className="text-sm mt-3 leading-relaxed" style={{ color: "#bcc6d2" }}>{guide.tip}</p>
+
+        <div className="text-center flex flex-col gap-4">
+          <p className="text-xl">{guide.detail}</p>
+          <p className="text-2xl font-semibold leading-snug">
+            Hold still until the image is clear.<br />Then tap {guide.action}.
+          </p>
         </div>
 
-        <div className="flex gap-3">
-          <button onClick={handleClose} className="flex-1 py-3 rounded-lg text-sm font-medium"
-            style={{ backgroundColor: "#202b37", color: "#e2e8ef", border: "1px solid #455260" }}>Cancel</button>
+        <div className="flex gap-4">
+          <button onClick={handleClose} className="flex-1 py-5 rounded-xl text-xl font-medium"
+            style={{ backgroundColor: control, color: "#e6ebf1", border: `1.5px solid ${controlBorder}` }}>Cancel</button>
           <button onClick={() => void handleCapture()} disabled={!frameUrl || Boolean(camError) || savingFront}
-            className="flex-[2] py-3 rounded-lg text-sm font-semibold disabled:opacity-40 flex items-center justify-center gap-2"
+            className="flex-[1.3] py-5 rounded-xl text-2xl font-bold disabled:opacity-40"
             style={{ backgroundColor: "var(--accent)", color: "#fff" }}>
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-              <circle cx="9" cy="9" r="6" stroke="currentColor" strokeWidth="1.8" />
-              <circle cx="9" cy="9" r="3" fill="currentColor" />
-            </svg>
-            {savingFront ? "Saving photo…" : docType === "license" && !frontSaved ? "Take Front Photo" : "Capture & Scan"}
+            {savingFront ? "Saving photo…" : guide.action}
           </button>
         </div>
-        {captureError && <p role="alert" className="text-sm text-red-300">{captureError}</p>}
-        <p className="text-xs text-center" style={{ color: "#aab8c7" }}>
-          {docType === "license" && !frontSaved ? "Hold still, then select Take Front Photo." : "Hold still, then select Capture & Scan."}
-        </p>
+        {captureError && <p role="alert" className="text-lg text-center text-red-300">{captureError}</p>}
       </div>
     </div>
   );
@@ -550,6 +554,7 @@ function CameraModal({
 function ScanPrompt({
   title,
   subtitle,
+  hint,
   docType,
   scanned,
   onScan,
@@ -558,6 +563,7 @@ function ScanPrompt({
 }: {
   title: string;
   subtitle: string;
+  hint: React.ReactNode;
   docType: "license" | "insurance";
   scanned: boolean;
   onScan: (result: ScanResult) => void;
@@ -616,37 +622,38 @@ function ScanPrompt({
       )}
 
       <div
-        className="rounded-xl overflow-hidden transition-all duration-300"
-        style={{ border: `2px ${state === "done" ? "solid" : "dashed"} ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
+        className="rounded-2xl overflow-hidden transition-all duration-300"
+        style={{ border: `${state === "done" ? 2 : 1.5}px solid ${state === "done" ? "#3a7d44" : "var(--border)"}`, backgroundColor: state === "done" ? "#f0f7ee" : "var(--card)" }}
       >
-        {/* [CG] bigger prompt and button so the scan step is easy to spot */}
+        {/* [SL] placement screen: big serif prompt, one line of instructions, one button */}
         {state === "idle" && (
-          <div className="flex flex-col items-center gap-4 px-6 py-10 text-center">
-            <div className="w-20 h-20 rounded-2xl flex items-center justify-center" style={{ backgroundColor: "var(--secondary)" }}>
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" style={{ color: "var(--primary)" }}>
-                <rect x="2" y="6" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.5" />
-                <path d="M8 6l1.2-2.4A1 1 0 0110.1 3h3.8a1 1 0 01.9.6L16 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <circle cx="18.5" cy="9.5" r="1" fill="currentColor" />
-              </svg>
+          <div className="flex flex-col items-center px-6 py-14 text-center">
+            <div className="w-32 h-28 rounded-3xl flex items-center justify-center" style={{ backgroundColor: "#e8edf4" }}>
+              {docType === "license" ? (
+                <svg width="92" height="58" viewBox="0 0 92 58" fill="none" aria-hidden="true" style={{ color: "var(--primary)" }}>
+                  <rect x="2" y="2" width="88" height="54" rx="5" stroke="currentColor" strokeWidth="3" />
+                  <circle cx="22" cy="20" r="7" stroke="currentColor" strokeWidth="3" />
+                  <path d="M9 42c1.5-8 6.5-12 13-12s11.5 4 13 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                  <path d="M48 16h28M48 29h28M48 42h18" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg width="56" height="72" viewBox="0 0 56 72" fill="none" aria-hidden="true" style={{ color: "var(--primary)" }}>
+                  <rect x="2" y="2" width="52" height="68" rx="4" stroke="currentColor" strokeWidth="3" />
+                  <path d="M12 16h32M12 30h32M12 44h32M12 58h32" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+              )}
             </div>
-            <div>
-              <p className="font-semibold text-xl mb-1" style={{ color: "var(--foreground)" }}>{title}</p>
-              <p className="text-sm leading-relaxed" style={{ color: error ? "#b42318" : "var(--muted-foreground)" }} role={error ? "alert" : undefined}>{error || subtitle}</p>
-            </div>
+            <h2 className="mt-12 text-5xl leading-tight max-w-2xl" style={{ color: "var(--primary)" }}>{title}</h2>
+            <p className="mt-8 text-2xl" style={{ color: "var(--foreground)" }}>{subtitle}</p>
+            <p className="mt-4 text-xl leading-relaxed max-w-md" style={{ color: error ? "#b42318" : "var(--muted-foreground)" }} role={error ? "alert" : undefined}>{error || hint}</p>
             <button
               onClick={openCamera}
-              className="flex items-center justify-center gap-2 px-10 py-4 rounded-lg text-base font-semibold transition-all duration-150"
+              className="mt-12 w-full max-w-sm py-5 rounded-lg text-2xl font-bold transition-colors duration-150"
               style={{ backgroundColor: "var(--accent)", color: "#ffffff" }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#d95c1a"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "var(--accent)"; }}
             >
-              <svg width="20" height="20" viewBox="0 0 16 16" fill="none">
-                <rect x="1" y="3" width="14" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-                <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-                <circle cx="12.5" cy="5.5" r="1" fill="currentColor" />
-              </svg>
-              {error ? "Try the Scanner Again" : "Open the Scanner"}
+              {error ? "Try again" : "I’m ready"}
             </button>
           </div>
         )}
@@ -784,8 +791,9 @@ function Step3({
     <div className="flex flex-col gap-6">
       {/* [CG] camera opens on its own; wording updated */}
       <ScanPrompt
-        title="Scan Proof of Insurance"
-        subtitle="Put your insurance card, or your phone showing your insurance, in the scanner box."
+        title="Place your proof of insurance in the scanner"
+        subtitle="Lay it flat with the details facing up."
+        hint={<>Using your phone? Open your insurance<br />and keep the screen on.</>}
         docType="insurance"
         scanned={insuranceScanned}
         onScan={handleInsuranceScan}
@@ -1139,8 +1147,9 @@ function AdminLogin({ onLogin }: { onLogin: () => void }) {
 export default function App() {
   const [authed, setAuthed] = useState(false);
   const [step, setStep] = useState<Step>(1);
+  const [started, setStarted] = useState(false);  // [SL] false = show the start screen (after sign-in and between customers)
   const [submitted, setSubmitted] = useState(false);
-  const [initials, setInitials] = useState("");
+  const [signature, setSignature] = useState("");  // [SL] drawn signature (PNG data URL), replaced the typed initials
   const [printResult, setPrintResult] = useState<PrintStatus | null>(null);
   const [printNotice, setPrintNotice] = useState("");
   const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] printer never finished, move on anyway
@@ -1162,7 +1171,7 @@ export default function App() {
   };
   useEffect(() => {
     const controller = new AbortController();
-    const expire = () => { setAuthed(false); setStaff(null); };
+    const expire = () => { setAuthed(false); setStaff(null); setStarted(false); };
     window.addEventListener("kiosk-session-expired", expire);
     staffSession(controller.signal)
       .then(user => { if (!controller.signal.aborted) { setAuthed(Boolean(user)); setStaff(user); } })
@@ -1183,7 +1192,7 @@ export default function App() {
     setSigningOut(true); setStaffMessage("");
     try {
       await signOut();
-      setAuthed(false); setStaff(null);
+      setAuthed(false); setStaff(null); setStarted(false);
     } catch (error) {
       setStaffMessage(error instanceof Error ? error.message : "Please try signing out again.");
     } finally {
@@ -1325,7 +1334,7 @@ export default function App() {
   const handlePrint = async () => {
     if (printPending.current) return;
     const error = renewalError(personal, license, insurance);
-    if (error || !initials) { setPaymentError(error || "Go back to Review and enter your initials before paying."); return; }
+    if (error || !signature) { setPaymentError(error || "Go back to Review and sign in the signature box before paying."); return; }
     printPending.current = true;
     setPrinting(true);
     setPaymentError("");
@@ -1348,7 +1357,7 @@ export default function App() {
       setPrintResult(await submitPrint({
         ...payload,
         form_details: JSON.stringify({ personal: { address, city, state, zip, county, phone, email } }),
-        initials,
+        signature,
       }));
       setSubmitted(true);
 
@@ -1377,7 +1386,7 @@ export default function App() {
     1: "Scan your driver’s license, then type your email and phone number.",
     2: "Check that these match your driver’s license. Tap a field to fix it.",
     3: "Scan your insurance card, then check your vehicle and insurance details.",
-    4: "Check everything one last time, then sign with your initials at the bottom.",
+    4: "Check everything one last time, then sign with your finger at the bottom.",
     5: "Pay $114.25 on the card reader. Your sticker and receipt print right after.",
   };
 
@@ -1514,12 +1523,26 @@ export default function App() {
 
             {/* [CG] Monday (CRM) status removed per sponsor. failed saves still go to runtime/kiosk-problems.log */}
 
-            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
+            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setSignature(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setStarted(false); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
           </div>
         </div>
       </div>
     );
   }
+
+  // [CG] staff bar with sign-out. [SL] shared with the start screen
+  const staffBar = staff && (
+    <div className="px-6 py-2 flex flex-wrap items-center justify-end gap-4 text-sm" style={{ background: "var(--primary)", color: "white" }}>
+      <span>{staff.username}{staff.mode === "master" ? " · Master administrator" : " · Staff"}</span>
+      <button type="button" disabled={signingOut} onClick={() => void handleSignOut()} className="underline">
+        {signingOut ? "Signing out…" : "Sign out"}
+      </button>
+      {staffMessage && <p role="alert">{staffMessage}</p>}
+    </div>
+  );
+
+  // [SL] start screen after sign-in and after each finished renewal; Start opens step 1 (and its camera)
+  if (!started) return <StartScreen staffBar={staffBar} onStart={() => { setStaffMessage(""); setStep(1); setStarted(true); }} />;
 
   // [CG] Continue checks this step first. stops at the first blank, outlines it red and scrolls to it
   const goNext = () => {
@@ -1538,16 +1561,7 @@ export default function App() {
   return (
     <ScanConfidence.Provider value={confidence}>
     <div className="kiosk-ui min-h-screen" style={{ backgroundColor: "var(--background)" }}>
-      {/* [CG] staff bar with sign-out */}
-      {staff && (
-        <div className="px-6 py-2 flex flex-wrap items-center justify-end gap-4 text-sm" style={{ background: "var(--primary)", color: "white" }}>
-          <span>{staff.username}{staff.mode === "master" ? " · Master administrator" : " · Staff"}</span>
-          <button type="button" disabled={signingOut} onClick={() => void handleSignOut()} className="underline">
-            {signingOut ? "Signing out…" : "Sign out"}
-          </button>
-          {staffMessage && <p role="alert">{staffMessage}</p>}
-        </div>
-      )}
+      {staffBar}
       {/* Header */}
       <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
@@ -1583,11 +1597,8 @@ export default function App() {
             <h2 className="text-xl">Customer signature</h2>
             <p>By signing I confirm that all information with this transaction is true and correct. I understand, I have until 12pm the next business day to make any corrections at no charge. After 12pm, I will be responsible for all applicable charges for any changes. I also understand that if this transaction is rejected by the county for any reason, a rejection fee may apply. I will be notified of the rejection and given the opportunity to resolve any issues; however, any fees assessed as a result of the rejection are my responsibility.</p>
             <p>I also understand that this information is used to ensure your transaction goes well. We will use this information to contact you if any issues arise before the transaction is submitted to the State of Texas. We may use this information to remind you of your annual vehicle registration.</p>
-            <label className="block max-w-xs">
-              Enter your initials to sign
-              <InputEl value={initials} autoCapitalize="characters" maxLength={8} required
-                onChange={event => setInitials(event.target.value.replace(/[^a-z]/gi, "").toUpperCase())} />
-            </label>
+            <p className="font-semibold pt-2">Sign below with your finger</p>
+            <SignaturePad value={signature} onChange={png => { setSignature(png); if (png) setFormError(""); }} />
           </section>}
         {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} error={paymentError} />}
         </div>
@@ -1632,7 +1643,7 @@ export default function App() {
             <button
               onClick={() => {
                 const error = renewalError(personal, license, insurance);
-                if (error || !initials) { setFormError(error || "Enter your initials in the signature box before continuing."); return; }  // [CG] was a pop-up
+                if (error || !signature) { setFormError(error || "Sign in the signature box before continuing."); return; }  // [CG] was a pop-up
                 setStep(5);
               }}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"

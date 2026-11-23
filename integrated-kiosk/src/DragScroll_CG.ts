@@ -21,8 +21,9 @@ function scroller(target: Element | null): Element {
 }
 
 // fields, dropdowns and the touch keyboard act normal (cursor placement, picking options)
+// [SL] the signature box too, or signing would scroll the page
 function leaveAlone(target: Element | null): boolean {
-  return Boolean(target?.closest("input, textarea, select, option, [contenteditable=true], .touch-keyboard"));
+  return Boolean(target?.closest("input, textarea, select, option, [contenteditable=true], .touch-keyboard, .signature-pad"));
 }
 
 export function enableDragScroll(root: Document = document): () => void {
