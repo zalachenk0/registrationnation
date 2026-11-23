@@ -3,7 +3,8 @@
 // Written by:   BV (the form, steps and screens); CG (payment and Monday.com
 //               calls, the Nov 19 fixes from the sponsor meeting, and the
 //               front photo, security photo and sign-out pieces the Nov 17
-//               rebuild dropped, tagged [CG]); SL (scan prompts)
+//               rebuild dropped, the hidden staff panel that replaced the
+//               sign-out bar on Nov 23, tagged [CG]); SL (scan prompts)
 // What it does: The whole touchscreen form: steps, scan prompts, review,
 //               payment, printing and the final screen.
 // Team-written: Logic written by BV (the form, steps and screens); CG (lines
@@ -21,6 +22,7 @@ import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
 import SignaturePad from "./SignaturePad_SL";  // [SL] finger signature on the review step
 import StartScreen from "./StartScreen_SL";  // [SL] welcome screen before each renewal
+import { StaffPanel } from "./StaffPanel_CG";  // [CG] hidden sign-out, Ctrl+Shift+L on a plugged-in keyboard
 import { displayDate, normalizeDate, renewalError, stepError, firstBlank, type FormStep } from "./renewal_BV";
 import { transactionId } from "./transaction_CG"; // [CG]
 import { counties, providers, vehicleModels, makes } from "./renewalOptions_BV";
@@ -1153,9 +1155,7 @@ export default function App() {
   const [printNotice, setPrintNotice] = useState("");
   const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] printer never finished, move on anyway
   const [checkingSession, setCheckingSession] = useState(true);
-  const [staff, setStaff] = useState<StaffUser | null>(null);  // [CG] for the sign-out bar
-  const [signingOut, setSigningOut] = useState(false);
-  const [staffMessage, setStaffMessage] = useState("");
+  const [staff, setStaff] = useState<StaffUser | null>(null);  // [CG] shown in the hidden staff panel
   const [formError, setFormError] = useState("");  // [CG] on-page message, pop-ups lock up the touchscreen
   const [missing, setMissing] = useState("");  // [CG] the blank field Continue stopped at
   const [scores, setScores] = useState<Record<string, number>>({});  // [CG] scan confidence per field
@@ -1182,22 +1182,21 @@ export default function App() {
     };
   }, []);
 
-  // [CG] staff sign-out. blocked mid-renewal so a paid customer's receipt doesn't get lost
+  // [CG] staff sign-out from the hidden panel. blocked mid-payment so a paid customer's receipt doesn't get lost.
+  // gives back the problem to show, or "" when signed out
   const handleSignOut = async () => {
     if (sessionStorage.getItem("kiosk-payment-reference")) {
-      setStaffMessage("Complete the current payment and receipt, then start a new renewal before signing out.");
-      return;
+      return "Complete the current payment and receipt, then start a new renewal before signing out.";
     }
-    setSigningOut(true); setStaffMessage("");
     try {
       await signOut();
       setAuthed(false); setStaff(null); setStarted(false);
+      return "";
     } catch (error) {
-      setStaffMessage(error instanceof Error ? error.message : "Please try signing out again.");
-    } finally {
-      setSigningOut(false);
+      return error instanceof Error ? error.message : "Please try signing out again.";
     }
   };
+  const staffPanel = <StaffPanel staff={staff} onSignOut={handleSignOut} />;  // [CG] renders nothing until Ctrl+Shift+L
 
 
   const cardEntry = useRef<CardEntry | null>(null);
@@ -1409,6 +1408,7 @@ export default function App() {
     const emailState = printResult?.email_state;
     return (
       <div className="kiosk-ui min-h-screen flex flex-col" style={{ backgroundColor: "var(--background)" }}>
+        {staffPanel}{/* [CG] */}
         {/* Header */}
         <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
           <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
@@ -1529,19 +1529,9 @@ export default function App() {
     );
   }
 
-  // [CG] staff bar with sign-out. [SL] shared with the start screen
-  const staffBar = staff && (
-    <div className="px-6 py-2 flex flex-wrap items-center justify-end gap-4 text-sm" style={{ background: "var(--primary)", color: "white" }}>
-      <span>{staff.username}{staff.mode === "master" ? " · Master administrator" : " · Staff"}</span>
-      <button type="button" disabled={signingOut} onClick={() => void handleSignOut()} className="underline">
-        {signingOut ? "Signing out…" : "Sign out"}
-      </button>
-      {staffMessage && <p role="alert">{staffMessage}</p>}
-    </div>
-  );
-
   // [SL] start screen after sign-in and after each finished renewal; Start opens step 1 (and its camera)
-  if (!started) return <StartScreen staffBar={staffBar} onStart={() => { setStaffMessage(""); setStep(1); setStarted(true); }} />;
+  // [CG] the visible sign-out bar is gone (customers could tap it); the hidden panel rides in the same slot
+  if (!started) return <StartScreen staffBar={staffPanel} onStart={() => { setStep(1); setStarted(true); }} />;
 
   // [CG] Continue checks this step first. stops at the first blank, outlines it red and scrolls to it
   const goNext = () => {
@@ -1560,7 +1550,7 @@ export default function App() {
   return (
     <ScanConfidence.Provider value={confidence}>
     <div className="kiosk-ui min-h-screen" style={{ backgroundColor: "var(--background)" }}>
-      {staffBar}
+      {staffPanel}{/* [CG] */}
       {/* Header */}
       <header style={{ backgroundColor: "#ffffff", borderBottom: "3px solid var(--accent)" }}>
         <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">

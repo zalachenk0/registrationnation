@@ -228,14 +228,29 @@ def preview_print():
 
 @app.post('/api/print/registration')
 def print_registration():
+    payload = request.get_json(silent=True)
     try:
-        payload = request.get_json(silent=True)
         paid = payments.verify_paid(payload)
         return jsonify(delivery.submit(payload, payment=paid))
     except ValueError as exc:
+        print_problem(payload, exc)  # [CG]
         return jsonify(error=str(exc)), 422
     except PrintError as exc:
+        print_problem(payload, exc)  # [CG]
         return jsonify(error=str(exc)), 503
+    except PaymentError as exc:  # [CG] same 409 answer as before, now logged too
+        print_problem(payload, exc)  # [CG]
+        return jsonify(error=str(exc)), 409
+    except Exception as exc:  # [CG] anything else used to come back as a Flask html page the screen couldn't read
+        app.logger.exception('Print request crashed.')  # [CG] full traceback in the start-pi_BV.sh terminal
+        print_problem(payload, exc)  # [CG]
+        return jsonify(error=f'The receipt could not be made ({type(exc).__name__}). Get a staff member. Do not pay again.'), 500  # [CG]
+
+
+# [CG] every print that fails goes in runtime/kiosk-problems.log so staff can see why. reference and error only, no customer info
+def print_problem(payload, exc):
+    reference = clean_reference(payload.get('confirmation_number')) if isinstance(payload, dict) else ''
+    log_problem('PRINT FAILED', f'{reference or "no reference"}: {type(exc).__name__}: {exc}')
 
 
 @app.get('/api/print/status/<reference>')

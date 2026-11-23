@@ -107,7 +107,7 @@ export async function submitPrint(payload: Record<string, string>): Promise<Prin
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload), signal: controller.signal,
     });
-    const result = await response.json();
+    const result = await response.json().catch(() => ({ error: `The kiosk server had a problem making the receipt (error ${response.status}). Get a staff member.` }));  // [CG] html error pages used to throw a JSON error nobody could read
     if (!response.ok || !result.success) throw new Error(result.error || "The print queue did not accept the job.");
     return result;
   } catch (error) {

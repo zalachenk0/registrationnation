@@ -44,21 +44,26 @@ export function TerminalPayment({ controllerRef, onReady, status, paid, busy, er
   // sponsor wanted the reader instructions to stand out more. one big panel that says what to do right now:
   // wait, tap your card, or what went wrong. payment starts on its own once the reader connects (App_BV_CG.tsx)
   const waitingForCard = busy && !paid && /tap|insert|swipe/i.test(status);
-  const headline = paid ? "Payment approved"
+  // paid but the print request failed: say so. this used to still read "printing" and hid the error
+  const printFailed = paid && !busy && Boolean(payError);
+  const headline = printFailed ? "Your payment went through, but the receipt didn't print"
+    : paid ? "Payment approved"
     : payError ? "Payment didn't go through"
     : error ? "The card reader isn't connected"
     : loading ? "Getting the card reader ready…"
     : waitingForCard ? "Tap, insert, or swipe your card on the card reader"
     : busy ? status || "Starting your payment…"
     : "Ready to pay";
-  const detail = paid ? "You won't be charged again. Your sticker and receipt are printing."
+  const detail = printFailed ? payError + " Tap Retry Printing below, or get a staff member."
+    : paid ? "You won't be charged again. Your sticker and receipt are printing."
     : payError ? payError
     : error ? error
     : loading ? "This takes a few seconds."
     : waitingForCard ? "The reader is showing $114.25. Follow its screen until it says approved."
     : busy ? "Please wait. Don't remove your card."
     : "The payment will start on the card reader in a moment.";
-  const tone = paid ? { bg: "#e6f4e8", border: "#3a7d44", text: "#1f5129" }
+  const tone = printFailed ? { bg: "#fdecea", border: "#b42318", text: "#7a1a12" }
+    : paid ? { bg: "#e6f4e8", border: "#3a7d44", text: "#1f5129" }
     : payError || error ? { bg: "#fdecea", border: "#b42318", text: "#7a1a12" }
     : { bg: "#fff4ec", border: "var(--accent)", text: "#7c2d12" };
   return <div className="flex flex-col gap-6">
