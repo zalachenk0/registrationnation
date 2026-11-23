@@ -3,8 +3,8 @@
 // Written by:   CG (Cristian Gonzalez)
 // What it does: Tests the Nov 23 changes: the sign-out bar is gone, the hidden
 //               staff panel only opens with Ctrl+Shift+L from a real keyboard,
-//               and a print that fails after payment shows its reason instead
-//               of "printing".
+//               a print that fails after payment shows its reason instead of
+//               "printing", and Review is back to typed initials.
 // Team-written: All logic written by CG (Cristian Gonzalez).
 // Third-party:  Node's built-in test runner; TypeScript (to load src/ files);
 //               React and jsdom (a browser page in Node).
@@ -149,4 +149,19 @@ test('when the card was charged but printing failed, the payment panel says so i
   assert.doesNotMatch(document.body.textContent, /are printing/);
   await show({ error: 'Your payment went through, so do not pay again. CUPS rejected the job.', busy: true });
   assert.doesNotMatch(document.body.textContent, /didn't print/, 'a retry in progress is not a failure');
+});
+
+// ---- typed initials instead of the finger signature ----
+
+test('Review asks for typed initials and the print sends initials, not a signature picture', () => {
+  const app = source('App_BV_CG.tsx');
+  assert.ok(!app.includes('SignaturePad'), 'the signature pad is off the form');
+  assert.ok(app.includes('Enter your initials to sign'));
+  assert.match(app, /setInitials\(event\.target\.value\.replace\(\/\[\^a-z\]\/gi, ""\)\.toUpperCase\(\)\)/, 'letters only, upper case, like printing_BV.py wants');
+  assert.match(app, /maxLength=\{8\}/);
+  assert.match(app, /\n\s+initials,\n/, 'initials go in the print request');
+  assert.ok(!/\n\s+signature,\n/.test(app), 'no signature in the print request');
+  const index = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');
+  const bundle = readFileSync(new URL('../dist/' + index.match(/src="\/(assets\/index-[^"]+\.js)"/)[1], import.meta.url), 'utf8');
+  assert.ok(bundle.includes('Enter your initials to sign') && !bundle.includes('Sign here with your finger'));
 });

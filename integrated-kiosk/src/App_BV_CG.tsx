@@ -20,7 +20,6 @@ import { PAYMENT_AMOUNT, type CardEntry, type PaymentResult } from "./payment_CG
 import { TerminalPayment } from "./TerminalPayment_CG";
 import { createMondayRecord } from "./monday_CG"; // [CG]
 import { CompletionTimer } from "./CompletionTimer_BV";
-import SignaturePad from "./SignaturePad_SL";  // [SL] finger signature on the review step
 import StartScreen from "./StartScreen_SL";  // [SL] welcome screen before each renewal
 import { StaffPanel } from "./StaffPanel_CG";  // [CG] hidden sign-out, Ctrl+Shift+L on a plugged-in keyboard
 import { displayDate, normalizeDate, renewalError, stepError, firstBlank, type FormStep } from "./renewal_BV";
@@ -1150,7 +1149,7 @@ export default function App() {
   const [step, setStep] = useState<Step>(1);
   const [started, setStarted] = useState(false);  // [SL] false = show the start screen (after sign-in and between customers)
   const [submitted, setSubmitted] = useState(false);
-  const [signature, setSignature] = useState("");  // [SL] drawn signature (PNG data URL), replaced the typed initials
+  const [initials, setInitials] = useState("");  // [CG] typed initials are back (Nov 23); the finger signature never printed on the Pi
   const [printResult, setPrintResult] = useState<PrintStatus | null>(null);
   const [printNotice, setPrintNotice] = useState("");
   const [printTimedOut, setPrintTimedOut] = useState(false);  // [CG] printer never finished, move on anyway
@@ -1332,7 +1331,7 @@ export default function App() {
   const handlePrint = async () => {
     if (printPending.current) return;
     const error = renewalError(personal, license, insurance);
-    if (error || !signature) { setPaymentError(error || "Go back to Review and sign in the signature box before paying."); return; }
+    if (error || !initials) { setPaymentError(error || "Go back to Review and enter your initials before paying."); return; }
     printPending.current = true;
     setPrinting(true);
     setPaymentError("");
@@ -1355,7 +1354,7 @@ export default function App() {
       setPrintResult(await submitPrint({
         ...payload,
         form_details: JSON.stringify({ personal: { address, city, state, zip, county, phone, email } }),
-        signature,
+        initials,
       }));
       setSubmitted(true);
 
@@ -1384,7 +1383,7 @@ export default function App() {
     1: "Scan your driver’s license, then type your email and phone number.",
     2: "Check that these match your driver’s license. Tap a field to fix it.",
     3: "Scan your insurance card, then check your vehicle and insurance details.",
-    4: "Check everything one last time, then sign with your finger at the bottom.",
+    4: "Check everything one last time, then sign with your initials at the bottom.",
     5: "Pay $114.25 on the card reader. Your sticker and receipt print right after.",
   };
 
@@ -1522,7 +1521,7 @@ export default function App() {
 
             {/* [CG] Monday (CRM) status removed per sponsor. failed saves still go to runtime/kiosk-problems.log */}
 
-            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setSignature(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setStarted(false); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
+            {(printComplete || printStopped) && <CompletionTimer onReset={() => { setSubmitted(false); setPaid(null); setInitials(""); setPrintResult(null); setPrintNotice(""); setPrintTimedOut(false); setScores({}); setPaymentError(""); setPaymentStatus(""); sessionStorage.removeItem("kiosk-payment-reference"); printReference.current = ""; setStep(1); setStarted(false); setLicensePrefilled(false); setPersonal({ firstName: "", lastName: "", dateOfBirth: "", email: "", phone: "", address: "", city: "", state: "", zip: "", county: "" }); setLicense({ licenseNumber: "", licenseState: "", expirationDate: "", licenseClass: "", vehicleYear: "", vehicleMake: "", vehicleModel: "", vin: "", licensePlate: "" }); setInsurance({ provider: "", policyNumber: "", policyHolder: "", startDate: "", endDate: "", coverageType: "", agentName: "", agentPhone: "" }); setPaymentReady(false); cardEntry.current = null; setCrmStatus("idle"); setCrmMessage(""); crmSavedRef.current = false; crmPayloadRef.current = null; }} />}
           </div>
         </div>
       </div>
@@ -1586,8 +1585,11 @@ export default function App() {
             <h2 className="text-xl">Customer signature</h2>
             <p>By signing I confirm that all information with this transaction is true and correct. I understand, I have until 12pm the next business day to make any corrections at no charge. After 12pm, I will be responsible for all applicable charges for any changes. I also understand that if this transaction is rejected by the county for any reason, a rejection fee may apply. I will be notified of the rejection and given the opportunity to resolve any issues; however, any fees assessed as a result of the rejection are my responsibility.</p>
             <p>I also understand that this information is used to ensure your transaction goes well. We will use this information to contact you if any issues arise before the transaction is submitted to the State of Texas. We may use this information to remind you of your annual vehicle registration.</p>
-            <p className="font-semibold pt-2">Sign below with your finger</p>
-            <SignaturePad value={signature} onChange={png => { setSignature(png); if (png) setFormError(""); }} />
+            <label className="block max-w-xs">{/* [CG] */}
+              Enter your initials to sign
+              <InputEl value={initials} autoCapitalize="characters" maxLength={8} required
+                onChange={event => { setInitials(event.target.value.replace(/[^a-z]/gi, "").toUpperCase()); setFormError(""); }} />
+            </label>
           </section>}
         {step === 5 && <TerminalPayment controllerRef={cardEntry} onReady={setPaymentReady} status={paymentStatus} paid={!!paid} busy={printing} error={paymentError} />}
         </div>
@@ -1632,7 +1634,7 @@ export default function App() {
             <button
               onClick={() => {
                 const error = renewalError(personal, license, insurance);
-                if (error || !signature) { setFormError(error || "Sign in the signature box before continuing."); return; }  // [CG] was a pop-up
+                if (error || !initials) { setFormError(error || "Enter your initials at the bottom before continuing."); return; }  // [CG] was a pop-up
                 setStep(5);
               }}
               className="flex items-center gap-2 text-sm font-semibold px-6 py-2.5 rounded-md transition-all duration-150"
