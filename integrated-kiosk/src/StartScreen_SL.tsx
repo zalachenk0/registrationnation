@@ -1,14 +1,13 @@
 // ============================================================================
 // File:         StartScreen_SL.tsx
-// Written by:   SL
+// Written by:   SL; CG (payment line reworded, tagged [CG])
 // What it does: Welcome screen shown after staff sign in and between
 //               customers. The customer taps Start to begin a renewal.
-// Team-written: All logic written by SL.
+// Team-written: All logic written by SL, except the line tagged [CG].
 // Third-party:  React
 // ============================================================================
 import type { ReactNode } from "react";
 import logoUrl from "./imports/RN_Logo.png";
-import { PAYMENT_LABEL } from "./payment_CG";
 
 const NEEDS = [
   {
@@ -32,7 +31,7 @@ const NEEDS = [
     ),
   },
   {
-    label: `A card to pay ${PAYMENT_LABEL}`,
+    label: "A card ready for payment",  // [CG] no amount here, the payment step shows it
     icon: (
       <svg width="40" height="28" viewBox="0 0 40 28" fill="none" aria-hidden="true">
         <rect x="1.5" y="1.5" width="37" height="25" rx="3.5" stroke="currentColor" strokeWidth="2.5" />

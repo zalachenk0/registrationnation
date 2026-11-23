@@ -196,3 +196,39 @@ def test_routes_the_form_calls_exist():
     rules = {rule.rule for rule in api.app.url_map.iter_rules()}
     for route in ('/api/camera/license-front', '/api/security/front-capture', '/api/auth/logout', '/api/auth/session'):
         assert route in rules, route
+
+
+# ---- [CG] Nov 23: the fee amounts always print on the receipt ----
+
+def receipt_page(payment):
+    data = dict(registrant='Jane Sample', license_plate='ABC1234', vehicle_year='2019', vehicle_make='Honda',
+                vehicle_model='Accord', vin=VIN, confirmation_number=SHORT_ID)
+    pdf = build_documents(document_data(data), payment=payment)
+    raw = pdf if isinstance(pdf, bytes) else pdf.getvalue()
+    return PdfReader(io.BytesIO(raw)).pages[1].extract_text()
+
+
+def amounts(text):
+    import re
+    return re.findall(r'(?<![\d.])\d{1,3}\.\d\d(?![\d.])', text)  # money only, not the 210.696.5600 phone number
+
+
+def test_paid_receipt_lists_each_charge_and_a_zero_balance():
+    found = amounts(receipt_page({'amount': 11425, 'id': 'pi_x', 'testMode': True}))
+    assert found[:3] == ['87.25', '21.64', '5.36']
+    assert found.count('114.25') == 2          # balance due and the card payment
+    assert found[-1] == '0.00'                 # outstanding balance
+    assert '—' not in receipt_page({'amount': 11425, 'id': 'pi_x', 'testMode': True})
+
+
+def test_a_receipt_without_a_payment_still_lists_the_charges():
+    text = receipt_page(None)
+    found = amounts(text)
+    assert found[:3] == ['87.25', '21.64', '5.36'] and '—' not in text
+    assert found[-1] == '114.25', 'nothing paid, so the whole amount is outstanding'
+
+
+def test_the_charges_add_up_to_what_the_kiosk_charges():
+    from receipt_documents_BV import FEES
+    from payment_service_CG import AMOUNT_CENTS
+    assert sum(FEES) == AMOUNT_CENTS

@@ -136,7 +136,7 @@ function ProgressBar({ current }: { current: Step }) {
 
 // [CG] scan confidence per field (0-1), keyed by field name. sponsor wanted a % on autofilled fields with the low ones
 // highlighted. typing in a field clears its badge since it's the customer's value now. barcode fields are always 100%
-export const CONFIDENT = 0.8;  // [CG] under 80% gets highlighted
+export const SHOW_AT_OR_BELOW = 0.75;  // [CG] only 75% or less gets a badge and a highlight; anything surer stays quiet
 const ScanConfidence = createContext<{
   scores: Record<string, number>; clear: (name: string) => void; mark: (scores: Record<string, number>) => void; missing: string;
 }>({ scores: {}, clear: () => undefined, mark: () => undefined, missing: "" });
@@ -161,7 +161,7 @@ function Field({
 }) {
   const { scores, clear, missing } = useContext(ScanConfidence);
   const score = name !== undefined ? scores[name] : undefined;
-  const shaky = score !== undefined && score < CONFIDENT;
+  const shaky = score !== undefined && score <= SHOW_AT_OR_BELOW;
   const blank = name !== undefined && name === missing;
   return (
     <div className="flex flex-col gap-1.5 rounded-md" data-field={name}
@@ -172,10 +172,9 @@ function Field({
           {label}
           {required && <span style={{ color: "#e05a1a" }} className="ml-0.5">*</span>}
         </span>
-        {score !== undefined && (
-          <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
-            style={shaky ? { backgroundColor: "#fef3c7", color: "#92400e" } : { backgroundColor: "#e6f4e8", color: "#2d6636" }}>
-            {shaky ? `Please check · scanned ${Math.round(score * 100)}% sure` : `Scanned · ${Math.round(score * 100)}% sure`}
+        {shaky && (
+          <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: "#fef3c7", color: "#92400e" }}>
+            {`Please check · scanned ${Math.round(score * 100)}% sure`}
           </span>
         )}
       </label>

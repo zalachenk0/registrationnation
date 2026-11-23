@@ -328,3 +328,22 @@ test('a drag that starts on a button scrolls but does not press it', async t => 
   page.drag(page.doc.getElementById('go'), 400, 400);
   assert.equal(pressed, 1, 'the next real tap works');
 });
+
+
+// ---- [CG] Nov 23: start screen wording and quieter confidence badges ----
+
+test('the start screen asks for a card without naming the amount', () => {
+  const start = source('StartScreen_SL.tsx');
+  assert.ok(start.includes('A card ready for payment'));
+  assert.ok(!/PAYMENT_LABEL|\$\d|114\.25/.test(start), 'no price on the start screen');
+  assert.ok(bundle.includes('A card ready for payment') && !bundle.includes('A card to pay'));
+});
+
+test('confidence badges only show at 75% or less', () => {
+  const app = source('App_BV_CG.tsx');
+  assert.match(app, /export const SHOW_AT_OR_BELOW = 0\.75;/);
+  assert.match(app, /const shaky = score !== undefined && score <= SHOW_AT_OR_BELOW;/, '75% itself counts as shaky');
+  assert.match(app, /\{shaky && \(/, 'no badge at all for sure fields');
+  assert.ok(!bundle.includes('Scanned · '), 'the green "Scanned · 95% sure" badge is gone');
+  assert.ok(bundle.includes('Please check · scanned '));
+});

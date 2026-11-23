@@ -1,6 +1,7 @@
 # ============================================================================
 # File:         receipt_documents_BV.py
-# Written by:   BV (Blas Vargas); CG (reads the shorter transaction ID, tagged [CG])
+# Written by:   BV (Blas Vargas); CG (the shorter transaction ID and the fee
+#               rows, tagged [CG])
 # What it does: Draws the two page print-out: the mock sticker and the Texas Tag
 #               & Title receipt.
 # Team-written: Logic written by BV (Blas Vargas); CG (lines tagged [CG]).
@@ -47,6 +48,11 @@ def _box(pdf, value, x, baseline, width, height=24, size=10, bold=False):
             paragraph.drawOn(pdf, x, baseline + font_size - used_height + 2)
             return
     raise ValueError('A receipt value is too long to fit. Shorten the field before printing.')
+
+
+# [CG] the renewal's charges in cents: county fee, TTT transaction charge, other charges. they add up to $114.25,
+# which has to match AMOUNT_CENTS in payment_service_CG.py (a test checks that)
+FEES = (8725, 2164, 536)
 
 
 def build_documents(data, payment=None, *, today=None):
@@ -173,11 +179,13 @@ def build_documents(data, payment=None, *, today=None):
         pdf.drawString(322, 585, f'{transaction_time:%m/%d/%Y %H:%M:%S} UTC  |  {kiosk}')
     pdf.setFillColor(black)
     pdf.setFont('Helvetica', 9)
-    fees = (8725, 2164, 536) if amount == 11425 else (None, None, None)
-    for baseline, fee in zip((425.85, 400.4, 375.65), fees):
-        pdf.drawRightString(478, baseline, f'{fee / 100:,.2f}' if fee is not None else '—')
-    rows = [(350.75, 0), (325.85, amount), (300.95, 0),
-            (276.05, amount), (251.15, 0), (225.85, 0)]
+    # [CG] fees always print now (they used to show a dash unless the amount matched exactly). balance due is their
+    # total, card payment is what Stripe took, and whatever's left over is the outstanding balance
+    for baseline, fee in zip((425.85, 400.4, 375.65), FEES):
+        pdf.drawRightString(478, baseline, f'{fee / 100:,.2f}')
+    due = sum(FEES)
+    rows = [(350.75, 0), (325.85, due), (300.95, 0),
+            (276.05, amount), (251.15, 0), (225.85, max(0, due - amount))]
     for baseline, cents in rows:
         pdf.drawRightString(478, baseline, f'{cents / 100:,.2f}')
     if payment:

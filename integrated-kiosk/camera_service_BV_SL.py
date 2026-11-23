@@ -147,6 +147,7 @@ class Camera:
         self._still_since = 0.0  # when the picture last stopped moving
         self._rebase = False  # the next preview frame becomes _scene_focused (a sweep just finished)
         self._await_move = False  # [CG] waiting for the license to be flipped (see expect_flip)
+        self._full_sweep = False  # [CG] next sweep checks the whole lens range, not just a climb (see force_focus)
 
     def status(self):
         with self.condition:
@@ -344,6 +345,14 @@ class Camera:
             self.focus_fresh = False
             self._await_move = True
 
+    def force_focus(self, full=False):
+        """[CG] Makes the next capture sweep even if the preview's focus looks fresh. full=True checks every lens
+        position across the range instead of climbing from the last one. Used for the back of the license: the
+        barcode needs a sharp shot, and a climb that starts from the front photo's position can stop early"""
+        with self.condition:
+            self.focus_fresh = False
+            self._full_sweep = full
+
     def _measure(self, read, position):
         """Moves the lens, waits for it to settle (keeping the preview live), returns the sharpness."""
         if position != self.focus:
@@ -375,8 +384,13 @@ class Camera:
             low, high = s.focus - s.focus_range, s.focus + s.focus_range
             step = max(1, s.focus_step)
             best = min(max(self.focus, low), high)
-            best_sharpness = self._measure(read, best)
-            tried = {best: best_sharpness}
+            if self._full_sweep:  # [CG] try every step across the range, keep the sharpest, then fine-tune below
+                tried = {position: self._measure(read, position) for position in range(low, high + 1, step)}
+                best = max(tried, key=tried.get)
+                best_sharpness = tried[best]
+            else:
+                best_sharpness = self._measure(read, best)
+                tried = {best: best_sharpness}
 
             def climb(direction, size):
                 nonlocal best, best_sharpness
@@ -391,7 +405,7 @@ class Camera:
                     best, best_sharpness, moved = position, tried[position], True
                 return moved
 
-            if not climb(1, step):
+            if not self._full_sweep and not climb(1, step):  # [CG] a full sweep already found the best step
                 climb(-1, step)
             half = step // 2
             if half and not climb(1, half):
@@ -401,6 +415,7 @@ class Camera:
             LOGGER.info('Focus sweep: lens %s, sharpness %.0f (%d positions)', best, best_sharpness, len(tried))
             self.focus_sharpness = best_sharpness
         finally:
+            self._full_sweep = False  # [CG]
             with self.condition:
                 self.focus_requested = False
                 self.focus_done_at = time.monotonic()
@@ -422,7 +437,7 @@ class Camera:
                 sweep = False
             if sweep:
                 self.focus_requested = True
-                timeout += 15
+                timeout += 40 if self._full_sweep else 15  # [CG] a full sweep takes a lot longer
             deadline = time.monotonic() + timeout
             # Captures require a frame produced after the button was pressed
             # (and after the focus sweep).

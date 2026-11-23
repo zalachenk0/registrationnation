@@ -177,13 +177,24 @@ def scan(kind):
     if not scan_lock.acquire(blocking=False):
         return jsonify(error='A scan is still processing. Wait for it to finish before trying again.'), 409
     try:
-        image = camera.get() if request.path.startswith('/api/camera/') else upload_image()
+        from_camera = request.path.startswith('/api/camera/')
+        if from_camera and kind == 'license':
+            camera.force_focus()  # [CG] the barcode always gets a fresh focus, never one left over from the preview
+        image = camera.get() if from_camera else upload_image()
         if kind == 'insurance':
             try:
                 delivery.enqueue_capture('insurance_scan')
             except Exception:
                 app.logger.warning('Insurance security photo could not be queued.')
-        result = {'license': scan_license, 'insurance': scan_insurance, 'registration': scan_registration}[kind](image)
+        try:
+            result = {'license': scan_license, 'insurance': scan_insurance, 'registration': scan_registration}[kind](image)
+        except ValueError:
+            if not (from_camera and kind == 'license'):
+                raise
+            # [CG] barcode unreadable: one full focus sweep across the whole lens range, then one more try
+            camera.force_focus(full=True)
+            image = camera.get()
+            result = scan_license(image)
         try:
             if result.get('success') and kind in {'license', 'insurance'}:  # a scan that read nothing must not replace a good photo
                 if kind == 'license':
